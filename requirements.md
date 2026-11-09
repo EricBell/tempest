@@ -10,7 +10,7 @@ Fidelity goal: capture the *feel* and rules of the original arcade game, not a p
 
 - Delivered as a single `index.html` (HTML5 + CSS + vanilla JS, no external dependencies).
 - The "host" on Windows and Linux is a modern web browser (Chrome, Edge, Firefox). Same file, same code, opened directly via `file://` or served by any static server. No build step. **[v1]**
-- **[later]** Optional desktop wrapper (e.g. Tauri/Electron) only if browser play proves insufficient (e.g. pointer-lock spinner feel).
+- **Decided:** a browser is the host. No desktop wrapper is planned; revisit only if browser play proves insufficient.
 
 ## 2. Core Gameplay (as in the original)
 
@@ -18,7 +18,7 @@ Fidelity goal: capture the *feel* and rules of the original arcade game, not a p
 - **Tube shapes:** The original has 16 distinct shapes, cycled in order. Shapes are either:
   - **Closed** (loop; the Blaster wraps around continuously) — e.g. circle, square, plus, bow-tie, cross, triangle, clover.
   - **Open** (distinct left/right end points; the Blaster stops at the ends) — e.g. V, steps, U, flat line, heart, star, W, fan, infinity.
-  - Lane count is commonly cited as 16 for open shapes and 15 for closed shapes (secondary sources; not independently verified).
+  - Every shape is defined by **16 points**. A **closed** shape joins the last point back to the first, giving **16 lanes**. An **open** shape does not, giving **15 lanes**. (Source: the original ROM level data as documented by the TempEd/Tempest Code Project; this corrects an earlier note that had them reversed.)
 - **Player (Blaster):** Claw-shaped ship that sits on the rim and *snaps* from lane to lane. It cannot leave the rim, except during the end-of-level warp.
 - **Shooting:** Rapid-fire shots travel down the Blaster's current lane. Holding fire gives continuous fire, with **at most 8 shots on screen**. Player shots also destroy enemy shots in the lane.
 - **Enemies:** Spawn at the far end as swirling dots, one at a time early on, then faster and in greater numbers as levels progress. See §5.4.
@@ -30,7 +30,7 @@ Fidelity goal: capture the *feel* and rules of the original arcade game, not a p
 - **Look:** Vector-arcade wireframe. Bright neon lines on a solid black background; glow via `shadowBlur`/layered strokes. Line colours change per tube/level-block (original: colour scheme changes every 16 levels, see §5.7).
 - **Perspective:** Pseudo-3D projection from one central vanishing point. A depth value `d` (0 = far centre, 1 = rim) maps to screen position by linear interpolation between the inner and outer vertex rings, with an optional perspective-correct scaling for enemy size.
 - **Colour convention (original-inspired):** Blaster yellow; Flippers red; Tankers purple; Spikers green; Fuseballs multi-colour flicker; Pulsars magenta/white; player shots yellow/white; enemy shots red/pink. Lane web in blue (level 1) and varies by level block.
-- **Audio [v1, nice-to-have]:** Synthesised with the Web Audio API only (no audio files): fire, enemy destroyed, player death, Superzapper, warp, extra life. Must start only after the first user gesture (browser autoplay policy) and have a mute key (`M`).
+- **Audio [later; v1 is silent]:** When added, synthesised with the Web Audio API only (no audio files): fire, enemy destroyed, player death, Superzapper, warp, extra life. Must start only after the first user gesture (browser autoplay policy) and have a mute key (`M`).
 
 ## 4. Technical Architecture & Constraints
 
@@ -46,9 +46,9 @@ Fidelity goal: capture the *feel* and rules of the original arcade game, not a p
 
 ### 5.1 The Web (Geometry)
 - Each tube shape is a table of outer-rim vertices (and a derived inner ring at a fixed ratio, e.g. 0.1–0.15 of the outer size) plus a `closed` flag.
-- Lanes are the quads between consecutive vertex pairs; **lane lines** radiate from the inner ring to the rim. Lane count follows §2.
+- Lanes are the quads between consecutive vertex pairs; **lane lines** radiate from the inner ring to the rim. Lane count follows §2 (16 closed / 15 open).
 - Lane indexing: lane 0 is the first segment at the bottom/left of the shape; increasing index = clockwise. Closed shapes wrap (`(i+n) % n`); open shapes clamp.
-- Required for v1: **at least the circle (closed), square (closed), and a V or U (open)**, selected by level. The remaining shapes are **[later]** — the data-driven shape table makes them cheap to add.
+- Required for v1 (decided): **circle (closed), square (closed), and V (open)**, cycling by level. The remaining shapes are **[later]** — the data-driven shape table makes them cheap to add.
 
 ### 5.2 The Player (The Blaster)
 - **Visual:** Bright yellow claw ("crab-claw" / jagged U) straddling the current lane on the rim.
@@ -56,9 +56,9 @@ Fidelity goal: capture the *feel* and rules of the original arcade game, not a p
 - **Controls:**
   - Left / `A`: move counter-clockwise one lane. Right / `D`: move clockwise.
   - Space (hold): fire. `Z` or `Shift`: Superzapper.
-  - **Mouse (v1, recommended):** horizontal mouse movement acts as the spinner (use Pointer Lock; accumulate `movementX` into lane steps). Left click = fire, right click = Superzapper. This is the closest match to the original dial.
+  - **Mouse (v1, opt-in):** keyboard works by default. Clicking the canvas enables the mouse spinner, where horizontal mouse movement moves the Blaster (use Pointer Lock; accumulate `movementX` into lane steps). Left click = fire, right click = Superzapper. This is the closest match to the original dial.
   - **[later]** Gamepad (analog stick / D-pad).
-- **Superzapper:** Two uses per level. First use destroys **all enemies currently on the playfield** (not enemy shots, spikes, or enemies not yet spawned); second use destroys **one random enemy**. Recharges at the start of each level. Fuseballs on the rim can only be killed this way.
+- **Superzapper:** Two uses per level. First use destroys **all enemies currently on the playfield** (not enemy shots, spikes, or enemies not yet spawned), killing them one after another over a short burst (~19 ticks, from the farthest-up enemy down); second use destroys **one enemy** (~5 ticks). No new enemies spawn while a zap is running. Recharges at the start of each level. Fuseballs on the rim can only be killed this way.
 
 ### 5.3 Projectiles
 - **Player shots:** Spawn at the rim in the Blaster's lane and travel toward the centre at a constant speed; removed at the centre. Max 8 live at once. Each shot hits at most one enemy (or an enemy shot) and is consumed.
@@ -72,19 +72,19 @@ Introduction levels are from the original; v1 may stage them in, but the spec ta
 |---|---|---|---|---|
 | **Flipper** | L1 (flips from L2) | Red chevron / bow-tie "X" | Climbs a lane; flips to adjacent lanes as it climbs. On reaching the rim it **chases the Blaster along the rim**; if it touches the Blaster it **captures/kills** it. May fire shots. | 150 |
 | **Tanker** | L3 | Purple rhombus | Slowly climbs a lane; splits into **two Flippers** (one in each adjacent lane) when shot or when it reaches the rim. | 100 |
-| **Spiker** | L4 | Green spiral | Climbs partway up a lane laying a **spike** trail, then reverses and goes back down. Shooting spikes shortens them. Spikes are a danger during the warp. | 50 (spike: 1–3) |
+| **Spiker** | L4 | Green spiral | Climbs a lane **almost to the rim** laying a **spike** trail, turns around just short of the rim, then retreats. If no enemies are left to spawn, it turns into a Flipper-carrying Tanker. Shooting a spike lowers it to the shot position. Spikes are a danger during the warp. | 50 (spike: 1–3) |
 | **Fuseball** | L11 | Multi-colour spark ball | Moves erratically along lane **edges**, forward/back and sideways. Cannot be shot while crossing lanes in some phases; deadly on contact. No projectiles. | 250 / 500 / 750 (higher when closer to the rim) |
-| **Pulsar** | L17 | Zig-zag line | Climbs and periodically **electrifies its lane**, killing the Blaster if it is in that lane. No projectiles. | 200 |
+| **Pulsar** | L17 | Zig-zag line | Advances while far from the Blaster and retreats when close. It **pulses** on a beat; while pulsing, the Blaster dies if it is in the Pulsar's lane within a set distance. No projectiles. | 200 |
 | Fuseball Tanker / Pulsar Tanker | later levels | Tanker variants | Split into two Fuseballs / Pulsars | 100 |
 
 - Enemies appear one at a time early on; spawn interval shortens and enemy count per wave rises with level.
-- **v1 scope:** Flipper, Tanker, Spiker/spikes, Fuseball, Pulsar are all in the original; recommend **v1 = Flipper + Tanker + Spiker**, with Fuseball and Pulsar **[later]**.
+- **v1 scope:** Flipper, Tanker, Spiker/spikes, Fuseball, Pulsar are all in the original; **Decided: v1 = Flipper + Tanker + Spiker**, with Fuseball and Pulsar **[later]**.
 
 ### 5.5 Systems / State Management **[v1]**
 - **Collision detection:** per §5.3. Blaster hit tests: enemy on the rim in the same lane (or overlapping edge for Fuseballs), enemy shot reaching the rim in the Blaster's lane, active Pulsar lane.
-- **Lives:** Start with 3. Hold at most 5. Bonus life awarded at score thresholds (original values not documented in the sources reviewed; **default: every 20,000 points** — adjustable constant).
-- **Death sequence:** Blaster explodes, all enemies and shots clear, brief pause, Blaster respawns on the rim with a short invulnerability window (or enemies reset to the start of the wave — see Open Questions).
-- **UI overlay** (monospaced font, top of canvas): score, high score, lives (as small claw icons), current level number. Centered messages: `PRESS START`, `LEVEL n`, `GAME OVER`.
+- **Lives:** Start with 3. Hold at most 6 (the ROM caps extra lives at 6). Bonus life awarded at score thresholds (original is a DIP-switch option: 10k / **20k (default)** / 30k / 40k / 50k / 60k / 70k / none; use **every 20,000 points** as an adjustable constant).
+- **Death sequence (decided: original behaviour):** the Blaster is blown apart, all enemies and shots clear, pending-enemy timers reset and the wave starts over. No invulnerability window.
+- **UI overlay** (monospaced font, top of canvas): score, high score, lives (as small claw icons), current level number. High scores: top three with 3-letter initials, stored in `localStorage`. Centered messages: `PRESS START`, `LEVEL n`, `GAME OVER`.
 - **Starting level:** Player may begin at levels 1, 3, 5, 7, or 9 (original "SkillStep"). **[later]**
 
 ### 5.6 Level Clear & Warp
@@ -103,58 +103,132 @@ Introduction levels are from the original; v1 may stage them in, but the spec ta
 ## 7. Acceptance Criteria (v1)
 1. `index.html` opens and plays in Chrome and Firefox on both Windows and Linux with no console errors.
 2. Game runs at the same speed on 60 Hz and 144 Hz displays.
-3. Circle, square, and one open shape (V or U) are playable; Blaster wraps on closed shapes and stops at the ends of open shapes.
+3. Circle, square, and V are playable; Blaster wraps on closed shapes (16 lanes) and stops at the ends of open shapes (15 lanes).
 4. Keyboard and mouse-spinner control both work; held fire is limited to 8 shots on screen.
 5. Flippers, Tankers, and Spikers behave as in §5.4; a Flipper on the rim can kill the Blaster.
 6. Superzapper works as specified (all, then one random).
 7. Clearing a wave triggers the warp and advances the level and tube shape.
-8. Lives, score, high score (persisted), and game over/restart all work.
+8. Lives, score, top-3 high scores with initials (persisted), and game over/restart all work.
 9. No external files, requests, or libraries.
 
-## 8. Open Questions (to discuss)
-1. Respawn rule: invulnerability after death, versus the original's reset of the wave?
-2. v1 enemy set: just Flipper/Tanker/Spiker, or all five?
-3. How many tube shapes in v1?
-4. Mouse spinner (pointer lock) as the primary control, or keyboard-first?
-5. Bonus-life interval: the default is 20,000. Do you know the value you want?
-6. Sound in v1, or silent first?
-7. Do you want a desktop wrapper at all, or is "a browser" the host?
+## 8. Decisions
 
-## 9. Known Gaps (details still to be specified)
+Settled in discussion; these override anything earlier in the document that conflicts.
 
-These are behaviours the spec does not yet define. Each needs a concrete value or rule before implementation of the related feature.
+| Topic | Decision |
+|---|---|
+| v1 enemies | Flipper + Tanker + Spiker (Fuseball, Pulsar later) |
+| Death | Original behaviour: clear enemies/shots, reset pending timers, restart the wave; no invulnerability |
+| Controls | Keyboard by default; mouse spinner (Pointer Lock) opt-in by clicking the canvas |
+| Sound | Silent in v1; synthesised Web Audio later |
+| Tube shapes | Circle, square, V in v1 |
+| Host | Browser only; no wrapper |
+| Bonus life | Every 20,000 points |
+| High scores | Top three with 3-letter initials, in `localStorage` |
+| §10 proposals | All accepted as defaults; speeds and sizes are tuned by feel during play |
 
-### 9.1 Gameplay numbers
-- **Wave composition:** No table of enemy counts per type per level, spawn intervals, or climb speeds. Needs at least a formula (e.g. `count = base + level * k`) so difficulty can be tuned and tested.
-- **Enemy shots:** No fire rate, per-enemy cap, or global cap on simultaneous enemy shots.
-- **Flipper behaviour:** Flip frequency, flip direction choice, and rim-chase speed are undefined.
-- **Spikes:** Shots needed to destroy a spike, maximum spike length, and whether spikes persist across the rest of the wave and into the warp.
-- **Hit-box sizes:** Depth extents for enemies and projectiles (needed by the swept collision test in §5.3), and a definition of "overlapping edge" for lane-edge enemies.
+## 9. Reference Data from the Original
 
-### 9.2 Warp (§5.6)
-- Duration, speed, and what the player controls during the warp (lane changes?).
-- What "retried" means after a spike kills the Blaster: restart the warp only, or the whole level?
+Taken from the reverse-engineered 6502 source (`tempest.a65`, final ROM revision) and the Tempest Code Project / TempEd notes. Treat as the target; v1 may simplify. Level numbers are 1-based. The ROM stores speeds as opaque tick counts, so speeds are given as trends and need tuning by feel.
 
-### 9.3 Scoring
-- Points (if any) for destroying enemy shots.
-- Whether the two Flippers released by a Tanker score separately from the Tanker.
-- Whether Superzapper kills award points per enemy.
+### 9.1 Hard limits
+| Limit | Value |
+|---|---|
+| Player shots on screen | 8 |
+| Enemies on screen at once | 7 (Tanker loads count double toward the limit) |
+| Enemy shots in flight | hard cap 4; per-level limit starts at **2** (L1–3) and rises to **3–4** later |
+| Pending (not yet spawned) enemies | up to 64 queued |
+| Lives held | **max 6** |
+| Levels | 99 (counter caps; L99 picks a random tube) |
+| Lanes | 16 closed / 15 open |
 
-### 9.4 Rendering
-- Whether depth `d` is linear in screen space or world space (affects apparent approach speed).
+### 9.2 Enemies per wave (total spawned in the wave)
+Levels 1–16: **10, 12, 15, 17, 20, 22, 20, 24, 27, 29, 27, 24, 26, 28, 30, 27**. Higher levels continue upward (roughly 27 → 43 by L81+).
 
-### 9.5 Game flow & input
-- Game-over flow: new high score message or initials entry; which key starts a new game.
-- Key-repeat start delay and mouse sensitivity setting.
-- Whether mouse and keyboard may be used at the same time.
-- Prevent browser default actions (e.g. Space scrolling the page, right-click context menu).
-- Behaviour when Pointer Lock is lost (Esc releases the lock): auto-pause.
-- Auto-pause when the tab loses focus or becomes hidden.
-- Cap the fixed-timestep accumulator so a long stall does not cause a burst of updates.
+### 9.3 Max of each type alive at once
+| Enemy | Levels → max |
+|---|---|
+| Flipper | 1–4: 4 · 5–16: 5 · 17–19: 3 · 20–25: 4 · 26+: 5 |
+| Tanker | 1–2: 0 · 3: 1 · 4: 0 · 5: 1 · 6–16: 2 · 17–32: 1 · 33–44: 2 · 45+: 3 |
+| Spiker | 1–3: 0 · 4: 2 · 5: 3 · 6–10: 4 · 11–16: 3 · 20–25: 2 · later mostly 1–2 |
+| Fuseball | 0 until L11 · 11–16: 1 · 33–39: 4 · 40+: 3 |
+| Pulsar | 0 until L17 · 17: 5 · 18: 3 · 19+: ~2 · 33+: 3 |
 
-### 9.6 Testing
+Minimum guaranteed per wave: Flipper ≥1 on L1–4; Tanker ≥1 from L3 (not L4); Spiker ≥1 on L4, ≥2 on L5–16; Fuseball ≥1 from L11; Pulsar ≥3 on L17–32.
+
+Spawn selection: new enemies come from a pending queue with countdown timers. A Spiker is chosen preferentially when the shortest spike in the tube is short. Spawning is suspended while the Superzapper runs.
+
+### 9.4 Enemy behaviour (from the ROM routines)
+- **Flipper:** climbs, then flips lane-to-lane using one of several per-level *movement programs* (e.g. "flip twice, then three times"). A flip runs until its angle completes. On open tubes it reverses direction at the end lane. On reaching the rim it heads toward the Blaster's lane. A non-retreating enemy that shares the Blaster's lane at the rim kills it.
+- **Tanker:** carries Flippers, Fuseballs or Pulsars. Splits into two when shot or when it reaches the point just short of the rim; the second piece is placed in the adjacent lane.
+- **Spiker:** grows its lane's spike as it climbs; turns around just short of the rim; hops lanes at the far end; becomes a Flipper-carrying Tanker if nothing else is pending.
+- **Fuseball:** moves at its own speed with randomised direction changes along lane edges; once nothing else is pending it rushes to the rim. Kills the Blaster on contact (same lane and depth). Hit tolerance is a fixed small value.
+- **Pulsar:** advances while far from the Blaster, retreats when close, pulses on a beat; the Blaster dies if it is in the Pulsar's lane within range while it pulses.
+- **Enemy shots:** an enemy only fires once it has climbed a minimum distance from the far end. The chance of firing depends on how many enemy shots are already in flight, via a table `$00,$E0,$F0,$FA,$FF` compared against a random byte; how the index maps is not fully clear from the source, so tune by feel. After firing, a per-level hold-off timer must elapse.
+- **Hit tolerance:** every enemy type has its own hit tolerance (how close a shot must be); Fuseball is fixed and small, others scale with level.
+
+### 9.5 Enemy shots (timing)
+- Hold-off between shots: ~80 ticks on L1, decreasing by ~3 per level to ~23 at L20, then ~20 (L21–64), then ~10 (L65+).
+- Shot speed is nearly constant across levels (slightly faster at L81+).
+
+### 9.6 Spikes
+- No spikes on L1–3. From L4 the starting spike height in each lane grows with level (short at L4, much longer by L13+).
+- A Spiker extends its lane's spike. A player shot that reaches a spike **lowers the spike to the shot's position** and scores **1 point**; a shot is removed after hitting a spike twice.
+- During the warp, if the spike in the Blaster's lane is taller than the Blaster's current depth, the Blaster dies.
+
+### 9.7 Speeds and the warp
+- Flipper speed rises steadily with level until ~L64, then plateaus. Pulsars and Fuseballs have their own tables. Spikers move at a near-constant speed, a little slower after L15.
+- **Warp:** the Blaster moves down the tube from the rim to the far end. Its speed accelerates every tick; the base acceleration is `max(12, level) × 4` plus a constant, capped for low levels. The warp ends when the Blaster reaches the far end.
+
+### 9.8 Scoring, lives, high scores
+- Points: Spike 1 per shot · Spiker 50 · Tanker 100 · Flipper 150 · Pulsar 200 · Fuseball 250/500/750 (closer to the rim = more). Score is 6 BCD digits.
+- Lives: 3 default (DIP options 2/3/4/5), max 6. Bonus life every 20,000 (DIP options 10k–70k or none).
+- Superzapper: 2 uses per level (first ~19 ticks, second ~5 ticks).
+- High scores: top three, each with a **3-letter initials** entry. "GAME OVER" is shown for ~40 ticks before the high-score check.
+- DIP difficulty (Easy/Medium/Hard): Easy = one fewer enemy shot and slower Flippers; Hard = more enemy shots (up to 3), faster Flippers, more enemies per wave, more Pulsar fire. **[later]**
+
+### 9.9 Player
+- Position is continuous: 16 sub-steps per lane (`position >> 4` = lane). Spinner input per frame is clamped to ±31 sub-steps. Closed tubes wrap; open tubes clamp at the ends.
+- No explicit fire-rate timer; the rate is limited by the 8 shot slots and a per-frame button debounce.
+- The player-shot colour shows how many are in flight: **yellow** under 6, **blue** 6–7, **red** at 8.
+- Death: the Blaster is blown apart (shot hit) or "spiked/pulsared apart" (pieces fly out). After death all shots and enemies are removed and pending timers reset.
+
+### 9.10 Tube order and colour
+- Tube order (index into the 16 stored shapes): `0,1,2,3,4,5,6,7,13,9,8,12,14,15,10,11`. Six of the shapes are open. 
+- 6 colour "cycles" of 8 entries (shots, claw, tankers, flippers, pulsars, spikers, level/web, info). Cycle 1 is the blue levels, cycle 2 the red levels, and so on.
+
+## 10. Gap Defaults (accepted)
+
+Items the source did not settle. Each default below is accepted for v1 and may be tuned by feel during play.
+
+### 10.1 Gameplay
+- **Exact speeds** in lanes/sec or depth/tick. **Default:** tune by feel, keeping the trends in §9.7.
+- **Flipper movement programs:** the byte patterns aren't decoded. **Default:** flip toward the Blaster after N ticks of climbing, N shrinking with level.
+- **Per-type hit tolerances** beyond the Fuseball. **Default:** enemy depth extent ≈ 4% of the tube, shots a point.
+- **Pulsar beat/fire intervals** in real time.
+- **Fuseball lane-edge movement probabilities.**
+- **Whether wave size resets after death** (the ROM resets the pending timers; the wave count likely restarts).
+
+### 10.2 Warp (§5.6)
+- Duration and lane control during the warp. **Default:** ~2–3 seconds, the Blaster can still change lanes, and a spike hit costs a life and restarts the warp only.
+
+### 10.3 Scoring
+- Points for destroying enemy shots (not found), and for each Tanker-spawned Flipper (assume normal values).
+- Start-level bonus table is **[later]**.
+
+### 10.4 Rendering
+- Depth mapping. **Default:** a perspective projection with a fixed camera; depth is linear in world space.
+
+### 10.5 Game flow and input
+- Key-repeat delay and mouse sensitivity.
+- Mouse and keyboard together: allowed.
+- Prevent browser defaults (Space scroll, right-click menu).
+- Pointer Lock loss (Esc): auto-pause. Auto-pause on tab hidden; cap the fixed-timestep accumulator.
+- High-score entry: the original uses top-3 with 3-letter initials. **Default:** implement it, stored in `localStorage`.
+
+### 10.6 Testing
 - Define which logic is pure and unit-testable without the DOM (lane math, wrapping/clamping, swept collision, score and bonus-life thresholds), using the seedable RNG from §4.
 
-### 9.7 Accessibility
-- Limit flashing/flicker (Superzapper, Fuseball, death) to avoid photosensitivity risk; consider a reduced-effects toggle.
+### 10.7 Accessibility
+- Limit flashing/flicker (Superzapper, Fuseball, death); offer a reduced-effects toggle.
 - Make enemy types distinguishable by shape as well as colour.
