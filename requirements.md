@@ -39,7 +39,7 @@ Fidelity goal: capture the *feel* and rules of the original arcade game, not a p
 - **Game loop:** `requestAnimationFrame` with a **fixed-timestep update** (60 Hz) and an accumulator, so behaviour is identical on 60/120/144 Hz displays. Render once per frame.
 - **Display:** Canvas fills the window, keeps a fixed logical aspect ratio (letterboxed), and honours `devicePixelRatio` for crisp lines. Resizes on window change.
 - **State machine:** `TITLE → PLAYING → (DYING → PLAYING) → WARP → PLAYING … → GAME_OVER → TITLE`, plus `PAUSED` (`P`/`Esc`).
-- **Persistence:** High score stored in `localStorage` (wrapped in try/catch; game must work without it).
+- **Persistence (opt-in):** Scoring is **off by default**. Only when the page is loaded with `?keep-score=1` does the game keep high scores in `localStorage` (wrapped in try/catch; game must work without it). Without the flag nothing is read from or written to storage.
 - **Determinism:** RNG isolated behind one function so a seed can be set for tests.
 
 ## 5. Detailed Component Specifications
@@ -84,7 +84,7 @@ Introduction levels are from the original; v1 may stage them in, but the spec ta
 - **Collision detection:** per §5.3. Blaster hit tests: enemy on the rim in the same lane (or overlapping edge for Fuseballs), enemy shot reaching the rim in the Blaster's lane, active Pulsar lane.
 - **Lives:** Start with 3. Hold at most 6 (the ROM caps extra lives at 6). Bonus life awarded at score thresholds (original is a DIP-switch option: 10k / **20k (default)** / 30k / 40k / 50k / 60k / 70k / none; use **every 20,000 points** as an adjustable constant).
 - **Death sequence (decided: original behaviour):** the Blaster is blown apart, all enemies and shots clear, pending-enemy timers reset and the wave starts over. No invulnerability window.
-- **UI overlay** (monospaced font, top of canvas): score, high score, lives (as small claw icons), current level number. High scores: top three with 3-letter initials, stored in `localStorage`. Centered messages: `PRESS START`, `LEVEL n`, `GAME OVER`.
+- **UI overlay** (monospaced font, top of canvas): score, high score, lives (as small claw icons), current level number. High scores (only with `?keep-score=1`): top three with 3-letter initials, stored in `localStorage`; the `HI` line, the title-screen table and the initials screen are hidden otherwise. Centered messages: `PRESS START`, `LEVEL n`, `GAME OVER`.
 - **Starting level:** Player may begin at levels 1, 3, 5, 7, or 9 (original "SkillStep"). **[later]**
 
 ### 5.6 Level Clear & Warp
@@ -108,7 +108,7 @@ Introduction levels are from the original; v1 may stage them in, but the spec ta
 5. Flippers, Tankers, and Spikers behave as in §5.4; a Flipper on the rim can kill the Blaster.
 6. Superzapper works as specified (all, then one random).
 7. Clearing a wave triggers the warp and advances the level and tube shape.
-8. Lives, score, top-3 high scores with initials (persisted), and game over/restart all work.
+8. Lives, score, and game over/restart work. With `?keep-score=1`, top-3 high scores with initials persist; without it, no high-score UI appears and `localStorage` is never touched.
 9. No external files, requests, or libraries.
 
 ## 8. Decisions
@@ -124,7 +124,7 @@ Settled in discussion; these override anything earlier in the document that conf
 | Tube shapes | Circle, square, V in v1 |
 | Host | Browser only; no wrapper |
 | Bonus life | Every 20,000 points |
-| High scores | Top three with 3-letter initials, in `localStorage` |
+| High scores | Opt-in via `?keep-score=1`: top three with 3-letter initials, in `localStorage`. Off by default: no table, no initials screen, no HUD `HI` line, no storage access |
 | §10 proposals | All accepted as defaults; speeds and sizes are tuned by feel during play |
 
 ## 9. Reference Data from the Original

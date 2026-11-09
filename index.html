@@ -189,7 +189,8 @@ function text(ctx, s, x, y, size, color, align) {
 class Game {
   constructor(opts) {
     opts = opts || {};
-    this.storage = opts.storage || null;
+    this.keepScore = !!opts.keepScore;     // high scores are opt-in (?keep-score=1)
+    this.storage = this.keepScore ? (opts.storage || null) : null;
     this.scores = this.loadScores();
     this.state = 'TITLE';
     this.paused = false;
@@ -209,6 +210,7 @@ class Game {
 
   // ---- persistence
   loadScores() {
+    if (!this.keepScore) return [];
     try {
       const raw = this.storage && this.storage.getItem('tempest_scores');
       const a = raw ? JSON.parse(raw) : [];
@@ -216,7 +218,7 @@ class Game {
     } catch (e) { /* storage unavailable */ }
     return [];
   }
-  saveScores() { try { if (this.storage) this.storage.setItem('tempest_scores', JSON.stringify(this.scores)); } catch (e) { /* ignore */ } }
+  saveScores() { try { if (this.keepScore && this.storage) this.storage.setItem('tempest_scores', JSON.stringify(this.scores)); } catch (e) { /* ignore */ } }
   get highScore() { return this.scores.length ? Math.max(this.scores[0].s, this.score) : this.score; }
 
   // ---- flow
@@ -286,7 +288,7 @@ class Game {
     this.updateFx();
     if (this.state === 'GAMEOVER') {
       if (--this.stateT <= 0) {
-        const qual = this.score > 0 && (this.scores.length < 3 || this.score > this.scores[this.scores.length - 1].s);
+        const qual = this.keepScore && this.score > 0 && (this.scores.length < 3 || this.score > this.scores[this.scores.length - 1].s);
         if (qual) { this.state = 'INITIALS'; this.name = ['A', 'A', 'A']; this.namePos = 0; }
         else this.state = 'TITLE';
       }
@@ -671,8 +673,10 @@ class Game {
   }
   renderHud(ctx) {
     text(ctx, String(this.score).padStart(6, '0'), 24, 34, 26, COL.text, 'left');
-    text(ctx, 'HI ' + String(this.highScore).padStart(6, '0'), W / 2, 34, 22, '#ffffff', 'center');
-    text(ctx, 'LEVEL ' + this.level, W / 2, 62, 16, COL.dim, 'center');
+    if (this.keepScore) {
+      text(ctx, 'HI ' + String(this.highScore).padStart(6, '0'), W / 2, 34, 22, '#ffffff', 'center');
+      text(ctx, 'LEVEL ' + this.level, W / 2, 62, 16, COL.dim, 'center');
+    } else text(ctx, 'LEVEL ' + this.level, W / 2, 34, 22, '#ffffff', 'center');
     for (let i = 0; i < this.lives; i++) {
       const f = { x: W - 40 - i * 34, y: 40, ux: 1, uy: 0, ox: 0, oy: -1, w: 20 };
       setStroke(ctx, COL.claw, 1.6, 6);
@@ -714,10 +718,12 @@ class Game {
     const lines = ['LEFT / RIGHT or A / D ... MOVE', 'SPACE ................... FIRE', 'Z or SHIFT ......... SUPERZAPPER',
                    'CLICK = MOUSE SPINNER  (LMB FIRE, RMB ZAP)', 'P / ESC ................. PAUSE'];
     lines.forEach((l, i) => text(ctx, l, cx, 330 + i * 26, 17, COL.dim, 'center'));
-    text(ctx, 'HIGH SCORES', cx, 520, 22, COL.text, 'center');
-    for (let i = 0; i < 3; i++) {
-      const s = this.scores[i];
-      text(ctx, (i + 1) + '. ' + (s ? s.n + '  ' + String(s.s).padStart(6, '0') : '---  ------'), cx, 555 + i * 28, 20, '#ffffff', 'center');
+    if (this.keepScore) {
+      text(ctx, 'HIGH SCORES', cx, 520, 22, COL.text, 'center');
+      for (let i = 0; i < 3; i++) {
+        const s = this.scores[i];
+        text(ctx, (i + 1) + '. ' + (s ? s.n + '  ' + String(s.s).padStart(6, '0') : '---  ------'), cx, 555 + i * 28, 20, '#ffffff', 'center');
+      }
     }
     ctx.shadowBlur = 0;
   }
@@ -731,10 +737,13 @@ root.TempestCore = { Game, SHAPES, setSeed, laneDir, stepLane, wrapLane, scaleAt
 if (typeof document !== 'undefined') {
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
-  let storage = null; try { storage = window.localStorage; storage.getItem('x'); } catch (e) { storage = null; }
-  const seed = new URLSearchParams(location.search).get('seed');
+  const params = new URLSearchParams(location.search);
+  const keepScore = params.get('keep-score') === '1';
+  let storage = null;
+  if (keepScore) { try { storage = window.localStorage; storage.getItem('x'); } catch (e) { storage = null; } }
+  const seed = params.get('seed');
   if (seed !== null) setSeed(parseInt(seed, 10) || 1);
-  const game = new Game({ storage });
+  const game = new Game({ storage, keepScore });
   root.__tempest = game;
 
   let dpr = 1, scale = 1;
