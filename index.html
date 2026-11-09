@@ -1,0 +1,803 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tempest</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; background: #000; cursor: crosshair; outline: none; }
+</style>
+</head>
+<body>
+<canvas id="c" tabindex="0"></canvas>
+<script>
+/* =====================================================================
+   TEMPEST clone - single file, no dependencies.
+   Spec: requirements.md. Logic (Game) is DOM-free so it can be tested
+   headlessly; the browser bootstrap is at the bottom of this script.
+   ===================================================================== */
+(function (root) {
+'use strict';
+
+// ---------------------------------------------------------------- constants
+const W = 800, H = 800;            // logical canvas size
+const CX = 400, CY = 430, R = 320; // vanishing point and rim radius
+const INNER = 0.12;                // far-ring scale relative to the rim
+const Z_FAR = 1 / INNER;
+const TAU = Math.PI * 2;
+const MAX_PLAYER_SHOTS = 8;
+const MAX_LIVES = 6;
+const BONUS_EVERY = 20000;
+const SPLIT_D = 0.93;              // tankers split / spikers turn here
+const SHOT_SPEED = 0.03;
+const ESHOT_SPEED = 0.011;
+
+const WEB_COLORS = ['#2f6bff', '#ff3b3b', '#e6e63a', '#3be6e6', '#3bff6b', '#c43bff'];
+const COL = {
+  claw: '#ffee33', shot: '#ffffaa', flipper: '#ff3355', tanker: '#c050ff',
+  spiker: '#33ff66', eshot: '#ff77aa', text: '#ffee33', dim: '#8899aa'
+};
+
+// ---------------------------------------------------------------- RNG (seedable)
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+let rng = mulberry32((Date.now() ^ 0x5bd1e995) >>> 0);
+function setSeed(s) { rng = mulberry32(s >>> 0); }
+const rand = () => rng();
+const randInt = n => Math.floor(rng() * n);
+
+// ---------------------------------------------------------------- tube shapes
+// Every shape is 16 points. Closed => 16 lanes (wraps), open => 15 lanes (clamps).
+// Lane index increases to the RIGHT at the bottom of the screen.
+function makeShapes() {
+  const circle = [], square = [], vee = [];
+  for (let i = 0; i < 16; i++) {
+    const a = Math.PI / 2 - i * TAU / 16;
+    circle.push([Math.cos(a), Math.sin(a)]);
+    const s = i / 16 * 4, side = Math.floor(s), f = s - side;
+    square.push(side === 0 ? [-1 + 2 * f, 1] : side === 1 ? [1, 1 - 2 * f]
+              : side === 2 ? [1 - 2 * f, -1] : [-1, -1 + 2 * f]);
+    const u = i / 15;
+    vee.push(u < 0.5 ? [-1 + u * 2, -0.8 + u * 3.2] : [(u - 0.5) * 2, 0.8 - (u - 0.5) * 3.2]);
+  }
+  return [
+    { name: 'CIRCLE', closed: true,  pts: circle, lanes: 16, start: 0 },
+    { name: 'SQUARE', closed: true,  pts: square, lanes: 16, start: 1 },
+    { name: 'V',      closed: false, pts: vee,    lanes: 15, start: 7 }
+  ];
+}
+const SHAPES = makeShapes();
+
+const scaleAt = d => 1 / (Z_FAR - d * (Z_FAR - 1));      // d: 0 far .. 1 rim
+
+function wrapLane(shape, l) {
+  const n = shape.lanes;
+  return shape.closed ? ((l % n) + n) % n : Math.max(0, Math.min(n - 1, l));
+}
+function stepLane(shape, l, dir) { return wrapLane(shape, l + dir); }
+// direction (+1/-1/0) to travel from lane a to lane b
+function laneDir(shape, a, b) {
+  if (a === b) return 0;
+  if (!shape.closed) return b > a ? 1 : -1;
+  const n = shape.lanes, diff = ((b - a) % n + n) % n;
+  return diff <= n / 2 ? 1 : -1;
+}
+function edgeXY(shape, i, d) {
+  const n = shape.pts.length;
+  const p = shape.pts[shape.closed ? ((i % n) + n) % n : Math.max(0, Math.min(n - 1, i))];
+  const s = scaleAt(d);
+  return [CX + p[0] * R * s, CY + p[1] * R * s];
+}
+function laneFrame(shape, l, d) {
+  const a = edgeXY(shape, l, d), b = edgeXY(shape, l + 1, d);
+  const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const w = Math.hypot(dx, dy) || 1e-6;
+  const ux = dx / w, uy = dy / w;
+  let ox = -uy, oy = ux;
+  if (ox * (mx - CX) + oy * (my - CY) < 0) { ox = -ox; oy = -oy; }
+  return { x: mx, y: my, ux, uy, ox, oy, w };
+}
+function frameRot(f, th) {
+  const c = Math.cos(th), s = Math.sin(th);
+  return { x: f.x, y: f.y, w: f.w,
+    ux: f.ux * c - f.uy * s, uy: f.ux * s + f.uy * c,
+    ox: f.ox * c - f.oy * s, oy: f.ox * s + f.oy * c };
+}
+
+// ---------------------------------------------------------------- level tables (from the ROM, see requirements.md s9)
+const WAVE_TOTAL = [10, 12, 15, 17, 20, 22, 20, 24, 27, 29, 27, 24, 26, 28, 30, 27];
+function waveTotal(L) { return L <= 16 ? WAVE_TOTAL[L - 1] : Math.min(43, 27 + Math.floor((L - 16) / 4)); }
+function maxFlippers(L) { return L <= 4 ? 4 : L <= 16 ? 5 : L <= 19 ? 3 : L <= 25 ? 4 : 5; }
+function maxTankers(L) {
+  if (L <= 2) return 0; if (L === 3) return 1; if (L === 4) return 0; if (L === 5) return 1;
+  if (L <= 16) return 2; if (L <= 32) return 1; if (L <= 44) return 2; return 3;
+}
+function maxSpikers(L) {
+  if (L <= 3) return 0; if (L === 4) return 2; if (L === 5) return 3; if (L <= 10) return 4;
+  if (L <= 16) return 3; if (L <= 19) return 0; if (L <= 25) return 2; return 1;
+}
+function minTankers(L) { return (L === 3 || L >= 5) ? 1 : 0; }
+function minSpikers(L) { return L === 4 ? 1 : L <= 16 && L >= 5 ? 2 : L >= 20 ? 1 : 0; }
+const SPIKE_HT = [0, 0, 0, 0xe0, 0xd8, 0xd4, 0xd0, 0xc8, 0xc0, 0xb8, 0xb0, 0xa8, 0xa0, 0xa0, 0xa0, 0xa8, 0xa0, 0x9c, 0x9a, 0x98];
+function initSpike(L) {
+  const h = SPIKE_HT[Math.min(L, 20) - 1];
+  return h ? 1 - (h - 0x10) / 0xe0 : 0;
+}
+function shotMax(L) {
+  const t = [2, 2, 2, 3, 4, 3, 3, 4, 4, 3];
+  return L <= 10 ? t[L - 1] : L <= 64 ? 3 : 4;
+}
+function shotHoldoff(L) { return L <= 20 ? 80 - 3 * (L - 1) : L <= 64 ? 20 : 10; }
+function flipperSpeed(L) { return Math.min(0.0095, 0.0032 + 0.00016 * L); }
+function spawnInterval(L) { return Math.max(24, 80 - 3 * L); }
+
+function makePlan(L) {
+  const total = waveTotal(L), mt = maxTankers(L), ms = maxSpikers(L);
+  const plan = [];
+  for (let i = 0; i < Math.min(minTankers(L), mt); i++) plan.push('tanker');
+  for (let i = 0; i < Math.min(minSpikers(L), ms); i++) plan.push('spiker');
+  let tk = plan.filter(t => t === 'tanker').length, sk = plan.length - tk;
+  while (plan.length < total) {
+    const r = rand();
+    if (mt > 0 && r < 0.18 && tk < total * 0.3) { plan.push('tanker'); tk++; }
+    else if (ms > 0 && r < 0.30 && sk < total * 0.25) { plan.push('spiker'); sk++; }
+    else plan.push('flipper');
+  }
+  for (let i = plan.length - 1; i > 0; i--) { const j = randInt(i + 1); [plan[i], plan[j]] = [plan[j], plan[i]]; }
+  return plan;
+}
+
+// ---------------------------------------------------------------- drawing helpers
+function setStroke(ctx, color, width, glow) {
+  ctx.strokeStyle = color; ctx.lineWidth = width;
+  ctx.shadowColor = color; ctx.shadowBlur = glow === undefined ? 8 : glow;
+}
+function localPath(ctx, pts, f, sa, sb, close) {
+  ctx.beginPath();
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    const x = f.x + f.ux * p[0] * sa + f.ox * p[1] * sb;
+    const y = f.y + f.uy * p[0] * sa + f.oy * p[1] * sb;
+    if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+  }
+  if (close) ctx.closePath();
+  ctx.stroke();
+}
+const CLAW = [[-0.62, -0.05], [-0.62, 0.55], [-0.34, 0.22], [-0.17, 0.72], [0, 0.25],
+              [0.17, 0.72], [0.34, 0.22], [0.62, 0.55], [0.62, -0.05], [0, -0.32]];
+const BOWTIE = [[-1, -0.55], [1, 0.55], [1, -0.55], [-1, 0.55]];
+const DIAMOND = [[0, 1], [1, 0], [0, -1], [-1, 0]];
+const DIAMOND_X = [[-0.5, 0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, -0.5]];
+const SPIRAL = (() => { const p = []; for (let i = 0; i <= 28; i++) { const a = i * 0.55, r = 0.1 + i * 0.032; p.push([Math.cos(a) * r, Math.sin(a) * r]); } return p; })();
+function text(ctx, s, x, y, size, color, align) {
+  ctx.font = 'bold ' + size + 'px "Courier New", Courier, monospace';
+  ctx.textAlign = align || 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = color; ctx.shadowColor = color; ctx.shadowBlur = 6;
+  ctx.fillText(s, x, y);
+}
+
+// ---------------------------------------------------------------- the game
+class Game {
+  constructor(opts) {
+    opts = opts || {};
+    this.storage = opts.storage || null;
+    this.scores = this.loadScores();
+    this.state = 'TITLE';
+    this.paused = false;
+    this.time = 0;
+    this.player = { lane: 0 };
+    this.shape = SHAPES[0];
+    this.level = 1; this.score = 0; this.lives = 3;
+    this.enemies = []; this.shots = []; this.eshots = []; this.fx = [];
+    this.spike = new Array(16).fill(0);
+    this.plan = [];
+    this.moveCool = 0; this.lastDir = 0; this.mouseAcc = 0;
+    this.fireCool = 0; this.zapPressed = false;
+    this.name = ['A', 'A', 'A']; this.namePos = 0;
+    this.stateT = 0; this.zap = null; this.zapUses = 0;
+    this.titleShape = 0;
+  }
+
+  // ---- persistence
+  loadScores() {
+    try {
+      const raw = this.storage && this.storage.getItem('tempest_scores');
+      const a = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(a)) return a.filter(e => e && typeof e.s === 'number').slice(0, 3);
+    } catch (e) { /* storage unavailable */ }
+    return [];
+  }
+  saveScores() { try { if (this.storage) this.storage.setItem('tempest_scores', JSON.stringify(this.scores)); } catch (e) { /* ignore */ } }
+  get highScore() { return this.scores.length ? Math.max(this.scores[0].s, this.score) : this.score; }
+
+  // ---- flow
+  newGame() {
+    this.score = 0; this.lives = 3; this.level = 1; this.nextBonus = BONUS_EVERY;
+    this.player.lane = SHAPES[0].start;
+    this.startLevel();
+  }
+  startLevel() {
+    const L = this.level;
+    this.shape = SHAPES[(L - 1) % SHAPES.length];
+    this.player.lane = this.shape.start;
+    this.spike = new Array(this.shape.lanes).fill(initSpike(L));
+    this.zapUses = 0; this.zap = null;
+    this.enemies = []; this.shots = []; this.eshots = []; this.fx = [];
+    this.plan = makePlan(L);
+    this.spawnTimer = 40; this.shotHold = 60; this.clearT = 0; this.clearMin = 60;
+    this.state = 'INTRO'; this.stateT = 100;
+  }
+  addScore(n) {
+    this.score += n;
+    while (this.score >= this.nextBonus) {
+      this.nextBonus += BONUS_EVERY;
+      this.lives = Math.min(MAX_LIVES, this.lives + 1);
+    }
+  }
+  setPause(on) {
+    if (['INTRO', 'PLAYING', 'WARP', 'DYING'].includes(this.state)) this.paused = !!on;
+  }
+  togglePause() { this.setPause(!this.paused); }
+  pressStart() {
+    if (this.state === 'TITLE') this.newGame();
+    else if (this.paused) this.paused = false;
+  }
+
+  // ---- input (called by the browser wrapper)
+  input(inp) { this.inp = inp; }
+  char(key, code) {                      // high-score initials entry
+    if (this.state !== 'INITIALS') return;
+    if (/^[a-zA-Z]$/.test(key)) { this.name[this.namePos] = key.toUpperCase(); this.namePos = Math.min(2, this.namePos + 1); }
+    else if (code === 'Backspace') { this.namePos = Math.max(0, this.namePos - 1); }
+    else if (code === 'ArrowUp' || code === 'ArrowDown') {
+      const c = this.name[this.namePos].charCodeAt(0) - 65 + (code === 'ArrowUp' ? 1 : 25);
+      this.name[this.namePos] = String.fromCharCode(65 + c % 26);
+    } else if (code === 'ArrowLeft') this.namePos = Math.max(0, this.namePos - 1);
+    else if (code === 'ArrowRight') this.namePos = Math.min(2, this.namePos + 1);
+    else if (code === 'Enter') {
+      if (this.namePos < 2) this.namePos++;
+      else this.finishInitials();
+    }
+  }
+  finishInitials() {
+    this.scores.push({ s: this.score, n: this.name.join('') });
+    this.scores.sort((a, b) => b.s - a.s);
+    this.scores = this.scores.slice(0, 3);
+    this.saveScores();
+    this.state = 'TITLE';
+  }
+
+  // ---- update (one fixed 1/60s tick)
+  step() {
+    this.time++;
+    if (this.paused) return;
+    const inp = this.inp || {};
+    if (this.state === 'TITLE') { return; }
+    if (this.state === 'INITIALS') return;
+    this.updateFx();
+    if (this.state === 'GAMEOVER') {
+      if (--this.stateT <= 0) {
+        const qual = this.score > 0 && (this.scores.length < 3 || this.score > this.scores[this.scores.length - 1].s);
+        if (qual) { this.state = 'INITIALS'; this.name = ['A', 'A', 'A']; this.namePos = 0; }
+        else this.state = 'TITLE';
+      }
+      return;
+    }
+    if (this.state === 'DYING') { this.updateDying(); return; }
+
+    this.movePlayer(inp);
+    if (inp.zap && !this.zapPressed) this.tryZap();
+    this.zapPressed = !!inp.zap;
+
+    if (this.state === 'INTRO') {
+      if (--this.stateT <= 0) this.state = 'PLAYING';
+      return;
+    }
+    // fire
+    if (this.fireCool > 0) this.fireCool--;
+    if (inp.fire && this.fireCool === 0 && this.shots.length < MAX_PLAYER_SHOTS) {
+      this.shots.push({ lane: this.player.lane, d: this.state === 'WARP' ? this.warpD : 1, prev: 1 });
+      this.fireCool = 4;
+    }
+    if (this.state === 'PLAYING') {
+      this.updateSpawn();
+      this.updateEnemies();
+      this.updateZap();
+    }
+    this.updateShots();
+    if (this.state === 'PLAYING') {
+      this.updateEnemyShots();
+      this.checkWaveClear();
+    } else if (this.state === 'WARP') this.updateWarp();
+  }
+
+  movePlayer(inp) {
+    const sh = this.shape;
+    let dir = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
+    if (this.moveCool > 0) this.moveCool--;
+    if (dir !== 0) {
+      if (dir !== this.lastDir) { this.player.lane = stepLane(sh, this.player.lane, dir); this.moveCool = 8; }
+      else if (this.moveCool === 0) { this.player.lane = stepLane(sh, this.player.lane, dir); this.moveCool = 4; }
+    }
+    this.lastDir = dir;
+    if (inp.mouse) {                      // accumulated pixels from Pointer Lock
+      this.mouseAcc += inp.mouse; inp.mouse = 0;
+      const STEP = 14;
+      while (this.mouseAcc >= STEP) { this.player.lane = stepLane(sh, this.player.lane, 1); this.mouseAcc -= STEP; }
+      while (this.mouseAcc <= -STEP) { this.player.lane = stepLane(sh, this.player.lane, -1); this.mouseAcc += STEP; }
+    }
+  }
+
+  // ---- spawning
+  aliveOf(type) { return this.enemies.filter(e => e.type === type).length; }
+  updateSpawn() {
+    if (this.zap || !this.plan.length) return;
+    if (--this.spawnTimer > 0) return;
+    if (this.enemies.length >= 7) { this.spawnTimer = 6; return; }
+    const L = this.level;
+    const cap = { flipper: maxFlippers(L), tanker: maxTankers(L), spiker: maxSpikers(L) };
+    const idx = this.plan.findIndex(t => this.aliveOf(t) < cap[t]);
+    if (idx < 0) { this.spawnTimer = 10; return; }
+    const type = this.plan.splice(idx, 1)[0];
+    this.enemies.push(this.makeEnemy(type, randInt(this.shape.lanes), 0, true));
+    this.spawnTimer = Math.round(spawnInterval(L) * (0.6 + rand() * 0.8));
+  }
+  makeEnemy(type, lane, d, unit) {
+    return { type, lane, d, dir: 1, flip: null, unit, flipTimer: 30 + randInt(70) - this.level };
+  }
+  enemyLane(e) { return e.flip && e.flip.t >= 0.5 ? stepLane(this.shape, e.lane, e.flip.dir) : e.lane; }
+
+  // ---- enemies
+  updateEnemies() {
+    const L = this.level, sh = this.shape;
+    const out = [];
+    for (const e of this.enemies) {
+      let keep = true;
+      if (e.type === 'flipper') this.updateFlipper(e);
+      else if (e.type === 'tanker') {
+        e.d += flipperSpeed(L) * 0.75;
+        if (e.d >= SPLIT_D) { this.splitTanker(e); keep = false; }
+      } else if (e.type === 'spiker') {
+        const spd = 0.0055;
+        if (e.dir > 0) {
+          e.d += spd;
+          this.spike[e.lane] = Math.max(this.spike[e.lane], e.d);
+          if (e.d >= SPLIT_D) {
+            if (!this.plan.length && this.enemies.length <= 2) { this.splitTanker(e); keep = false; }
+            else e.dir = -1;
+          }
+        } else { e.d -= spd; if (e.d <= 0) keep = false; }
+      }
+      if (keep) out.push(e);
+    }
+    this.enemies = out;
+    // enemy fire
+    if (this.shotHold > 0) this.shotHold--;
+    if (this.shotHold === 0 && this.eshots.length < shotMax(L)) {
+      const c = this.enemies.filter(e => !e.flip && e.d > 0.12 && e.d < 0.88);
+      if (c.length && rand() < 0.04) {
+        const e = c[randInt(c.length)];
+        this.eshots.push({ lane: e.lane, d: e.d, prev: e.d });
+        this.shotHold = shotHoldoff(L);
+      }
+    }
+    // contact with the Blaster
+    for (const e of this.enemies) {
+      if (e.type === 'flipper' && e.d >= 0.97 && this.enemyLane(e) === this.player.lane) { this.killPlayer(); break; }
+    }
+  }
+  updateFlipper(e) {
+    const L = this.level, sh = this.shape;
+    if (e.d < 1) e.d = Math.min(1, e.d + flipperSpeed(L));
+    const atRim = e.d >= 1;
+    if (e.flip) {
+      e.flip.t += 1 / 14;
+      if (e.flip.t >= 1) { e.lane = stepLane(sh, e.lane, e.flip.dir); e.flip = null; }
+      return;
+    }
+    if (--e.flipTimer > 0) return;
+    if (!atRim && L < 2) { e.flipTimer = 60; return; }       // flippers flip from level 2
+    let dir;
+    if (atRim) dir = laneDir(sh, e.lane, this.player.lane);
+    else dir = (rand() < 0.5 && this.player.lane !== e.lane) ? laneDir(sh, e.lane, this.player.lane) : (rand() < 0.5 ? 1 : -1);
+    if (dir !== 0 && stepLane(sh, e.lane, dir) === e.lane) dir = -dir;          // reverse at an open end
+    if (dir !== 0 && stepLane(sh, e.lane, dir) !== e.lane) e.flip = { dir, t: 0 };
+    e.flipTimer = atRim ? Math.max(8, 40 - 2 * L) : Math.max(25, 90 - 3 * L) + randInt(40);
+  }
+  splitTanker(t) {
+    const sh = this.shape;
+    const a = stepLane(sh, t.lane, -1), b = stepLane(sh, t.lane, 1);
+    for (const lane of [a, b]) {
+      const f = this.makeEnemy('flipper', lane, Math.min(t.d, 0.95), false);
+      f.flipTimer = 15 + randInt(30);
+      this.enemies.push(f);
+    }
+    this.burst(...Object.values(this.xy(t.lane, t.d)), COL.tanker, 8);
+  }
+  xy(lane, d) { const f = laneFrame(this.shape, lane, d); return { x: f.x, y: f.y }; }
+
+  // ---- shots and collisions
+  updateShots() {
+    const keepShots = [];
+    for (const s of this.shots) {
+      s.prev = s.d; s.d -= SHOT_SPEED;
+      let alive = s.d > 0;
+      // vs enemies
+      if (alive) {
+        for (let i = 0; i < this.enemies.length; i++) {
+          const e = this.enemies[i];
+          if (this.enemyLane(e) !== s.lane) continue;
+          const tol = e.type === 'tanker' ? 0.045 : 0.04;
+          if (e.d >= s.d - tol && e.d <= s.prev + tol) { this.killEnemy(e, true); alive = false; break; }
+        }
+      }
+      // vs enemy shots
+      if (alive) {
+        for (let i = 0; i < this.eshots.length; i++) {
+          const q = this.eshots[i];
+          if (q.lane === s.lane && q.d >= s.d - 0.03 && q.d <= s.prev + 0.03) {
+            this.eshots.splice(i, 1); this.addScore(0); alive = false; break;
+          }
+        }
+      }
+      // vs spikes
+      if (alive && this.spike[s.lane] > 0 && s.d <= this.spike[s.lane] && s.prev >= this.spike[s.lane] - SHOT_SPEED - 0.02) {
+        this.spike[s.lane] = Math.max(0, this.spike[s.lane] - 0.1);
+        if (this.spike[s.lane] < 0.02) this.spike[s.lane] = 0;
+        this.addScore(1); alive = false;
+      }
+      if (alive) keepShots.push(s);
+    }
+    this.shots = keepShots;
+  }
+  killEnemy(e, byShot) {
+    const idx = this.enemies.indexOf(e);
+    if (idx >= 0) this.enemies.splice(idx, 1);
+    const pts = { flipper: 150, tanker: 100, spiker: 50 }[e.type] || 0;
+    this.addScore(pts);
+    const p = this.xy(this.enemyLane(e), e.d);
+    this.burst(p.x, p.y, COL[e.type], 10);
+    if (e.type === 'tanker' && byShot) this.splitTanker(e);
+  }
+  updateEnemyShots() {
+    const keep = [];
+    for (const q of this.eshots) {
+      q.prev = q.d; q.d += ESHOT_SPEED;
+      if (q.d >= 1) { if (q.lane === this.player.lane) this.killPlayer(); continue; }
+      keep.push(q);
+    }
+    this.eshots = keep;
+  }
+
+  // ---- superzapper
+  tryZap() {
+    if (this.state !== 'PLAYING' || this.zap || this.zapUses >= 2) return;
+    this.zapUses++;
+    this.zap = this.zapUses === 1 ? { t: 0, len: 19, all: true } : { t: 0, len: 5, all: false, left: 1 };
+  }
+  updateZap() {
+    const z = this.zap; if (!z) return;
+    z.t++;
+    if (z.t >= 3 && z.t % 2 === 1 && this.enemies.length && (z.all || z.left > 0)) {
+      const e = this.enemies[this.enemies.length - 1];
+      this.killEnemy(e, false);
+      if (!z.all) z.left--;
+    }
+    if (z.t >= z.len) this.zap = null;
+  }
+
+  // ---- death, warp, level flow
+  killPlayer() {
+    if (this.state !== 'PLAYING' && this.state !== 'WARP') return;
+    this.dyingFrom = this.state;
+    this.state = 'DYING'; this.stateT = 80;
+    const f = laneFrame(this.shape, this.player.lane, this.dyingFrom === 'WARP' ? this.warpD : 1);
+    this.burst(f.x, f.y, COL.claw, 26);
+    this.shots = []; this.lives--;
+  }
+  updateDying() {
+    if (--this.stateT > 0) return;
+    if (this.lives <= 0) { this.state = 'GAMEOVER'; this.stateT = 120; return; }
+    if (this.dyingFrom === 'PLAYING') {
+      // the wave restarts: surviving wave enemies go back to the queue
+      for (const e of this.enemies) if (e.unit) this.plan.unshift(e.type);
+      this.enemies = []; this.eshots = []; this.zap = null;
+      this.spawnTimer = 90; this.shotHold = 60;
+    } else this.clearMin = 150;
+    this.clearT = 0;
+    this.state = 'PLAYING';
+  }
+  checkWaveClear() {
+    if (!this.plan.length && !this.enemies.length && !this.eshots.length && !this.zap) {
+      if (++this.clearT >= this.clearMin) {
+        this.state = 'WARP'; this.warpD = 1; this.warpV = 0.006; this.clearMin = 60;
+      }
+    } else this.clearT = 0;
+  }
+  updateWarp() {
+    this.warpV = Math.min(0.035, this.warpV + 0.0004 + 0.00002 * this.level);
+    this.warpD -= this.warpV;
+    if (this.spike[this.player.lane] > 0 && this.spike[this.player.lane] >= this.warpD) { this.killPlayer(); return; }
+    if (this.warpD <= 0.01) { this.level++; this.startLevel(); }
+  }
+
+  // ---- effects
+  burst(x, y, color, n) {
+    for (let i = 0; i < n; i++) {
+      const a = rand() * TAU, v = 0.6 + rand() * 3;
+      this.fx.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 24 + randInt(24), color, len: 4 + rand() * 8 });
+    }
+  }
+  updateFx() {
+    for (const p of this.fx) { p.x += p.vx; p.y += p.vy; p.life--; }
+    this.fx = this.fx.filter(p => p.life > 0);
+  }
+
+  // ================================================================ render
+  render(ctx) {
+    ctx.save();
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    if (this.state === 'TITLE') this.renderTitle(ctx);
+    else {
+      this.renderWeb(ctx);
+      this.renderSpikes(ctx);
+      this.renderEnemies(ctx);
+      this.renderShots(ctx);
+      this.renderPlayer(ctx);
+      this.renderFx(ctx);
+      this.renderHud(ctx);
+      this.renderOverlay(ctx);
+    }
+    ctx.restore();
+  }
+  webColor() {
+    const c = WEB_COLORS[Math.floor((this.level - 1) / 16) % WEB_COLORS.length];
+    return (this.zap && this.zap.t < 3) ? '#ffffff' : c;
+  }
+  renderWeb(ctx, shape, color, level) {
+    shape = shape || this.shape; color = color || this.webColor();
+    const n = shape.pts.length;
+    setStroke(ctx, color, 1.6, 8);
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const a = edgeXY(shape, i, 1), b = edgeXY(shape, i, 0);
+      ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
+    }
+    ctx.stroke();
+    // far ring
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) { const p = edgeXY(shape, i, 0); if (i) ctx.lineTo(p[0], p[1]); else ctx.moveTo(p[0], p[1]); if (!shape.closed && i === n - 1) break; }
+    ctx.stroke();
+    // warp depth rings
+    if (this.state === 'WARP') {
+      setStroke(ctx, color, 1, 4);
+      for (let k = 0; k < 8; k++) {
+        const d = ((k / 8) + (this.time * 0.01)) % 1;
+        ctx.beginPath();
+        for (let i = 0; i <= n; i++) { const p = edgeXY(shape, i, d); if (i) ctx.lineTo(p[0], p[1]); else ctx.moveTo(p[0], p[1]); if (!shape.closed && i === n - 1) break; }
+        ctx.stroke();
+      }
+    }
+    // rim
+    setStroke(ctx, color, 3.2, 12);
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) { const p = edgeXY(shape, i, 1); if (i) ctx.lineTo(p[0], p[1]); else ctx.moveTo(p[0], p[1]); if (!shape.closed && i === n - 1) break; }
+    ctx.stroke();
+    // player lane highlight
+    if (this.state !== 'TITLE' && !level) {
+      const a = edgeXY(shape, this.player.lane, 1), b = edgeXY(shape, this.player.lane + 1, 1);
+      setStroke(ctx, COL.claw, 4, 14);
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    }
+  }
+  renderSpikes(ctx) {
+    setStroke(ctx, COL.spiker, 2, 6);
+    ctx.beginPath();
+    for (let l = 0; l < this.shape.lanes; l++) {
+      const h = this.spike[l];
+      if (h > 0) {
+        const a = laneFrame(this.shape, l, 0), b = laneFrame(this.shape, l, h);
+        ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+      }
+    }
+    ctx.stroke();
+  }
+  renderEnemies(ctx) {
+    const sh = this.shape;
+    for (const e of this.enemies) {
+      let f = laneFrame(sh, e.lane, e.d);
+      if (e.flip) {
+        const f1 = laneFrame(sh, stepLane(sh, e.lane, e.flip.dir), e.d), t = e.flip.t;
+        let dt = Math.atan2(f1.uy, f1.ux) - Math.atan2(f.uy, f.ux);
+        while (dt > Math.PI) dt -= TAU; while (dt < -Math.PI) dt += TAU;
+        const lift = Math.sin(Math.PI * t) * f.w * 0.35;
+        const g = frameRot(f, dt * t + Math.PI * t * e.flip.dir);
+        g.x = f.x + (f1.x - f.x) * t + f.ox * lift;
+        g.y = f.y + (f1.y - f.y) * t + f.oy * lift;
+        f = g;
+      }
+      const sa = Math.min(f.w * 0.42, 60), sb = sa * 0.75;
+      if (e.type === 'flipper') { setStroke(ctx, COL.flipper, 2.2, 8); localPath(ctx, BOWTIE, f, sa, sb, true); }
+      else if (e.type === 'tanker') {
+        setStroke(ctx, COL.tanker, 2.2, 8); localPath(ctx, DIAMOND, f, sa, sb, true); localPath(ctx, DIAMOND_X, f, sa * 0.8, sb * 0.8, false);
+      } else {
+        const g = frameRot(f, this.time * 0.25);
+        setStroke(ctx, COL.spiker, 2, 8); localPath(ctx, SPIRAL, g, sa * 1.1, sa * 1.1, false);
+      }
+    }
+  }
+  renderShots(ctx) {
+    setStroke(ctx, COL.shot, 2.5, 8);
+    ctx.beginPath();
+    for (const s of this.shots) {
+      const a = laneFrame(this.shape, s.lane, s.d), b = laneFrame(this.shape, s.lane, Math.min(1, s.d + 0.035));
+      ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+    }
+    ctx.stroke();
+    setStroke(ctx, COL.eshot, 2, 8);
+    for (const q of this.eshots) {
+      const f = laneFrame(this.shape, q.lane, q.d), sz = Math.min(f.w * 0.18, 14);
+      const g = frameRot(f, this.time * 0.5);
+      localPath(ctx, [[-1, -1], [1, 1], [1, -1], [-1, 1]], g, sz, sz, false);
+    }
+  }
+  renderPlayer(ctx) {
+    if (this.state === 'DYING' || this.state === 'GAMEOVER' || this.state === 'INITIALS') return;
+    const d = this.state === 'WARP' ? this.warpD : 1;
+    const f = laneFrame(this.shape, this.player.lane, d);
+    const s = Math.min(f.w, 100) * 0.5;
+    const color = this.shots.length >= 8 ? '#ff5533' : this.shots.length >= 6 ? '#66aaff' : COL.claw;
+    setStroke(ctx, COL.claw, 2.6, 12);
+    localPath(ctx, CLAW, f, s, s, true);
+    if (color !== COL.claw) { setStroke(ctx, color, 1.2, 6); localPath(ctx, CLAW, f, s * 0.7, s * 0.7, true); }
+  }
+  renderFx(ctx) {
+    for (const p of this.fx) {
+      setStroke(ctx, p.color, 2, 6);
+      ctx.globalAlpha = Math.min(1, p.life / 20);
+      ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x + p.vx * p.len / 2, p.y + p.vy * p.len / 2); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+  renderHud(ctx) {
+    text(ctx, String(this.score).padStart(6, '0'), 24, 34, 26, COL.text, 'left');
+    text(ctx, 'HI ' + String(this.highScore).padStart(6, '0'), W / 2, 34, 22, '#ffffff', 'center');
+    text(ctx, 'LEVEL ' + this.level, W / 2, 62, 16, COL.dim, 'center');
+    for (let i = 0; i < this.lives; i++) {
+      const f = { x: W - 40 - i * 34, y: 40, ux: 1, uy: 0, ox: 0, oy: -1, w: 20 };
+      setStroke(ctx, COL.claw, 1.6, 6);
+      localPath(ctx, CLAW, f, 14, 14, true);
+    }
+    ctx.shadowBlur = 0;
+    // superzapper charges
+    for (let i = 0; i < 2 - this.zapUses; i++) {
+      setStroke(ctx, '#66ccff', 2, 6);
+      ctx.beginPath(); ctx.arc(30 + i * 22, 70, 6, 0, TAU); ctx.stroke();
+    }
+  }
+  renderOverlay(ctx) {
+    const cx = W / 2;
+    if (this.state === 'INTRO') text(ctx, this.shape.name + '  -  LEVEL ' + this.level, cx, 110, 28, '#ffffff', 'center');
+    if (this.state === 'GAMEOVER') text(ctx, 'GAME OVER', cx, CY, 56, '#ff3355', 'center');
+    if (this.state === 'INITIALS') {
+      text(ctx, 'NEW HIGH SCORE', cx, 250, 40, '#ffffff', 'center');
+      text(ctx, 'SCORE ' + this.score, cx, 300, 26, COL.text, 'center');
+      for (let i = 0; i < 3; i++) {
+        text(ctx, this.name[i], cx - 60 + i * 60, 400, 64, i === this.namePos ? '#ffffff' : COL.text, 'center');
+        if (i === this.namePos) { setStroke(ctx, '#ffffff', 3, 8); ctx.beginPath(); ctx.moveTo(cx - 85 + i * 60, 440); ctx.lineTo(cx - 35 + i * 60, 440); ctx.stroke(); }
+      }
+      text(ctx, 'TYPE LETTERS OR USE UP/DOWN  -  ENTER TO CONFIRM', cx, 500, 16, COL.dim, 'center');
+    }
+    if (this.paused) {
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, W, H);
+      text(ctx, 'PAUSED', cx, CY - 20, 56, '#ffffff', 'center');
+      text(ctx, 'PRESS P, ENTER OR CLICK TO RESUME', cx, CY + 30, 18, COL.dim, 'center');
+    }
+    ctx.shadowBlur = 0;
+  }
+  renderTitle(ctx) {
+    const shape = SHAPES[Math.floor(this.time / 240) % SHAPES.length];
+    this.renderWeb(ctx, shape, '#2f6bff', true);
+    const cx = W / 2;
+    text(ctx, 'TEMPEST', cx, 150, 96, '#ff3355', 'center');
+    text(ctx, 'PRESS ENTER OR CLICK TO START', cx, 250, 24, '#ffffff', 'center');
+    const lines = ['LEFT / RIGHT or A / D ... MOVE', 'SPACE ................... FIRE', 'Z or SHIFT ......... SUPERZAPPER',
+                   'CLICK = MOUSE SPINNER  (LMB FIRE, RMB ZAP)', 'P / ESC ................. PAUSE'];
+    lines.forEach((l, i) => text(ctx, l, cx, 330 + i * 26, 17, COL.dim, 'center'));
+    text(ctx, 'HIGH SCORES', cx, 520, 22, COL.text, 'center');
+    for (let i = 0; i < 3; i++) {
+      const s = this.scores[i];
+      text(ctx, (i + 1) + '. ' + (s ? s.n + '  ' + String(s.s).padStart(6, '0') : '---  ------'), cx, 555 + i * 28, 20, '#ffffff', 'center');
+    }
+    ctx.shadowBlur = 0;
+  }
+}
+
+// ---------------------------------------------------------------- exports (for headless tests)
+root.TempestCore = { Game, SHAPES, setSeed, laneDir, stepLane, wrapLane, scaleAt, laneFrame, edgeXY,
+  waveTotal, maxFlippers, maxTankers, maxSpikers, initSpike, shotHoldoff, shotMax, makePlan, W, H };
+
+// ---------------------------------------------------------------- browser bootstrap
+if (typeof document !== 'undefined') {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  let storage = null; try { storage = window.localStorage; storage.getItem('x'); } catch (e) { storage = null; }
+  const seed = new URLSearchParams(location.search).get('seed');
+  if (seed !== null) setSeed(parseInt(seed, 10) || 1);
+  const game = new Game({ storage });
+  root.__tempest = game;
+
+  let dpr = 1, scale = 1;
+  function resize() {
+    dpr = window.devicePixelRatio || 1;
+    scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+    canvas.style.width = Math.floor(W * scale) + 'px';
+    canvas.style.height = Math.floor(H * scale) + 'px';
+    canvas.width = Math.floor(W * scale * dpr);
+    canvas.height = Math.floor(H * scale * dpr);
+  }
+  window.addEventListener('resize', resize); resize();
+
+  const keys = new Set();
+  const inp = { left: false, right: false, fire: false, zap: false, mouse: 0 };
+  let mouseFire = false, mouseZap = false;
+  function pollInput() {
+    inp.left = keys.has('ArrowLeft') || keys.has('KeyA');
+    inp.right = keys.has('ArrowRight') || keys.has('KeyD');
+    inp.fire = keys.has('Space') || mouseFire;
+    inp.zap = keys.has('KeyZ') || keys.has('ShiftLeft') || keys.has('ShiftRight') || mouseZap;
+    game.input(inp);
+  }
+  const LOCK_KEYS = new Set(['Space', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
+  window.addEventListener('keydown', e => {
+    if (LOCK_KEYS.has(e.code)) e.preventDefault();
+    if (game.state === 'INITIALS') { game.char(e.key, e.code); return; }
+    if (e.repeat) { keys.add(e.code); return; }
+    keys.add(e.code);
+    if (e.code === 'Enter' || (e.code === 'Space' && game.state === 'TITLE')) game.pressStart();
+    else if (e.code === 'KeyP') game.togglePause();
+    else if (e.code === 'Escape') game.setPause(true);
+  });
+  window.addEventListener('keyup', e => keys.delete(e.code));
+  window.addEventListener('blur', () => { keys.clear(); mouseFire = mouseZap = false; game.setPause(true); });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) game.setPause(true); });
+
+  const locked = () => document.pointerLockElement === canvas;
+  canvas.addEventListener('contextmenu', e => e.preventDefault());
+  canvas.addEventListener('mousedown', e => {
+    if (!locked()) {
+      try { canvas.requestPointerLock(); } catch (err) { /* ignore */ }
+      if (game.state === 'TITLE' || game.paused) game.pressStart();
+      return;
+    }
+    if (e.button === 0) mouseFire = true; else if (e.button === 2) mouseZap = true;
+  });
+  window.addEventListener('mouseup', e => { if (e.button === 0) mouseFire = false; else if (e.button === 2) mouseZap = false; });
+  document.addEventListener('mousemove', e => { if (locked()) inp.mouse += e.movementX; });
+  document.addEventListener('pointerlockchange', () => { if (!locked()) { mouseFire = mouseZap = false; game.setPause(true); } });
+
+  let last = performance.now(), acc = 0;
+  const DT = 1000 / 60;
+  function frame(now) {
+    acc += Math.min(now - last, 250); last = now;           // cap to avoid a burst after a stall
+    while (acc >= DT) { pollInput(); game.step(); acc -= DT; }
+    ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+    game.render(ctx);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+</script>
+</body>
+</html>

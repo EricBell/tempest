@@ -47,7 +47,7 @@ Fidelity goal: capture the *feel* and rules of the original arcade game, not a p
 ### 5.1 The Web (Geometry)
 - Each tube shape is a table of outer-rim vertices (and a derived inner ring at a fixed ratio, e.g. 0.1–0.15 of the outer size) plus a `closed` flag.
 - Lanes are the quads between consecutive vertex pairs; **lane lines** radiate from the inner ring to the rim. Lane count follows §2 (16 closed / 15 open).
-- Lane indexing: lane 0 is the first segment at the bottom/left of the shape; increasing index = clockwise. Closed shapes wrap (`(i+n) % n`); open shapes clamp.
+- Lane indexing: lane 0 is the first segment at the bottom/left of the shape; increasing index moves **right at the bottom of the screen** (so Right = +1 lane; on the circle this is counter-clockwise on screen, which keeps Left/Right matching the screen at the Blaster's starting position). Closed shapes wrap (`(i+n) % n`); open shapes clamp.
 - Required for v1 (decided): **circle (closed), square (closed), and V (open)**, cycling by level. The remaining shapes are **[later]** — the data-driven shape table makes them cheap to add.
 
 ### 5.2 The Player (The Blaster)
@@ -232,3 +232,16 @@ Items the source did not settle. Each default below is accepted for v1 and may b
 ### 10.7 Accessibility
 - Limit flashing/flicker (Superzapper, Fuseball, death); offer a reduced-effects toggle.
 - Make enemy types distinguishable by shape as well as colour.
+
+## 11. Implementation Notes (index.html, v1)
+
+Where the first build deviates from, or fills in, this spec:
+
+- **Lane direction:** see §5.1 — Right key = +1 lane = rightward at the bottom of the screen.
+- **Death:** enemies on the web are cleared; wave enemies that were still alive go back to the front of the spawn queue (kills stay kills), then spawning restarts after ~1.5 s. After a death *in the warp* only the warp is retried, after a 2.5 s pause.
+- **Warp:** the Blaster can change lanes and fire during the warp. It starts automatically 1 s after the web is clear. Initial spikes (L4+) are short, so shooting one clears a lane.
+- **Spikes:** each hit on a spike shortens it by 10% of the tube depth and scores 1 point; the shot is consumed.
+- **Superzapper:** first use kills enemies one by one over ~19 ticks, second use kills one. Tankers killed by the zapper do not split. Spawning pauses while zapping. Charges show as two cyan rings under the score.
+- **Pause:** `P` toggles; `Esc`, losing Pointer Lock, tab blur and tab hide all pause (never unpause).
+- **Fixed-timestep loop:** 60 Hz, accumulator capped at 250 ms. Seed the RNG with `?seed=123`. `window.TempestCore` and `window.__tempest` expose the logic for testing.
+- **Not built (per §8):** sound, Fuseball, Pulsar, the other 13 tube shapes, gamepad, start-level selection.
