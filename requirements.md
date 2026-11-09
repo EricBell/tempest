@@ -30,7 +30,7 @@ Fidelity goal: capture the *feel* and rules of the original arcade game, not a p
 - **Look:** Vector-arcade wireframe. Bright neon lines on a solid black background; glow via `shadowBlur`/layered strokes. Line colours change per tube/level-block (original: colour scheme changes every 16 levels, see §5.7).
 - **Perspective:** Pseudo-3D projection from one central vanishing point. A depth value `d` (0 = far centre, 1 = rim) maps to screen position by linear interpolation between the inner and outer vertex rings, with an optional perspective-correct scaling for enemy size.
 - **Colour convention (original-inspired):** Blaster yellow; Flippers red; Tankers purple; Spikers green; Fuseballs multi-colour flicker; Pulsars magenta/white; player shots yellow/white; enemy shots red/pink. Lane web in blue (level 1) and varies by level block.
-- **Audio [later; v1 is silent]:** When added, synthesised with the Web Audio API only (no audio files): fire, enemy destroyed, player death, Superzapper, warp, extra life. Must start only after the first user gesture (browser autoplay policy) and have a mute key (`M`).
+- **Audio (issue #3):** Synthesised with the Web Audio API only (no audio files). Effects: fire, lane change, spike hit, enemy shot, Tanker split, enemy destroyed (a distinct sound per enemy type), Pulsar pulse, player death, Superzapper (different for the first and second use), warp, extra life, level start, game over. No background music. The `AudioContext` is created only after the first user gesture. Controls: `M` mutes, `-` / `+` (also numpad, and `=`) change the volume in 10% steps, and a slider on the title and pause screens sets it. Volume defaults to 50% and, with the mute state, persists in `localStorage` (§4). The title and pause screens show the controls and the current volume or MUTED; a brief readout appears when it changes during play.
 
 ## 4. Technical Architecture & Constraints
 
@@ -39,7 +39,7 @@ Fidelity goal: capture the *feel* and rules of the original arcade game, not a p
 - **Game loop:** `requestAnimationFrame` with a **fixed-timestep update** (60 Hz) and an accumulator, so behaviour is identical on 60/120/144 Hz displays. Render once per frame.
 - **Display:** Canvas fills the window, keeps a fixed logical aspect ratio (letterboxed), and honours `devicePixelRatio` for crisp lines. Resizes on window change.
 - **State machine:** `TITLE → PLAYING → (DYING → PLAYING) → WARP → PLAYING … → GAME_OVER → TITLE`, plus `PAUSED` (`P`/`Esc`).
-- **Persistence (opt-in):** Scoring is **off by default**. Only when the page is loaded with `?keep-score=1` does the game keep high scores in `localStorage` (wrapped in try/catch; game must work without it). Without the flag nothing is read from or written to storage.
+- **Persistence:** Scoring is **off by default**. Only when the page is loaded with `?keep-score=1` does the game keep **high scores** in `localStorage` (wrapped in try/catch; game must work without it). Without the flag no *score* data is read or written. The **audio settings** (volume and mute) are separate: they persist under their own key (`tempest_audio`) regardless of the flag.
 - **Determinism:** RNG isolated behind one function so a seed can be set for tests.
 
 ## 5. Detailed Component Specifications
@@ -108,7 +108,7 @@ Introduction levels are from the original; v1 may stage them in, but the spec ta
 5. Flippers, Tankers, and Spikers behave as in §5.4; a Flipper on the rim can kill the Blaster.
 6. Superzapper works as specified (all, then one random).
 7. Clearing a wave triggers the warp and advances the level and tube shape.
-8. Lives, score, and game over/restart work. With `?keep-score=1`, top-3 high scores with initials persist; without it, no high-score UI appears and `localStorage` is never touched.
+8. Lives, score, and game over/restart work. With `?keep-score=1`, top-3 high scores with initials persist; without it, no high-score UI appears and no score data touches `localStorage` (only the separate `tempest_audio` key is used).
 9. No external files, requests, or libraries.
 
 ## 8. Decisions
@@ -120,7 +120,7 @@ Settled in discussion; these override anything earlier in the document that conf
 | Enemies | v1: Flipper + Tanker + Spiker. Added later (issue #2): Fuseball (L11+), Pulsar (L17+), Fuseball/Pulsar Tankers (L20+) |
 | Death | Original behaviour: clear enemies/shots, reset pending timers, restart the wave; no invulnerability |
 | Controls | Keyboard by default; mouse spinner (Pointer Lock) opt-in by clicking the canvas |
-| Sound | Silent in v1; synthesised Web Audio later |
+| Sound | Synthesised Web Audio (issue #3): effects only, no music. `M` mutes, `-`/`+` and a slider set volume (default 50%), settings persist in `localStorage`, on-screen hints |
 | Tube shapes | Circle, square, V in v1 |
 | Host | Browser only; no wrapper |
 | Bonus life | Every 20,000 points |
@@ -248,4 +248,5 @@ Where the first build deviates from, or fills in, this spec:
 - **Pulsar (issue #2):** climbs to 92% depth, retreats to 45%, and repeats. It flips lanes toward the Blaster (70%) or randomly. It pulses for 28 of every 90 ticks; while pulsing the whole lane from the Pulsar down to the rim is electrified and kills the Blaster if it is in that lane. Score 200. Never shoots.
 - **Tanker variants (issue #2):** from L20 some Tankers carry Fuseballs (a pair, on the Tanker's two lane edges) or Pulsars (in the neighbouring lanes). The payload shows as the colour of the inner cross: red = Flippers, orange = Fuseballs, magenta = Pulsars. Payload enemies don't count against the per-type caps. A Tanker killed by the Superzapper does not split.
 - **Caps and minimums:** Fuseball and Pulsar maxima and per-wave minimums follow §9.3. Tanker/Spiker/Fuseball/Pulsar shares of the remaining wave slots are tuned by feel.
-- **Not built (per §8):** sound, the other 13 tube shapes, gamepad, start-level selection.
+- **Audio (issue #3):** `Game` only emits events (`level`, `fire`, `lane`, `kill {type}`, `eshot`, `split`, `spike`, `pulse`, `death`, `zap {n}`, `warp`, `life`, `gameover`) through an `onEvent` callback; it contains no Web Audio code. `AudioEngine` (same file, separate class, takes a context factory so it can be tested with a fake) turns events into synthesised sounds behind one master gain node (`gain = volume²`, 0 when muted). Fire and lane sounds are rate-limited and low-priority sounds are dropped above 10 live voices (hard cap 24). The context is suspended while paused or the tab is hidden. The slider is an HTML range input shown only on the title and pause screens (the mouse is free then) and blurs itself after use so it never takes Space or arrow keys. Audio randomness (noise) uses `Math.random`, never the seeded game RNG.
+- **Not built (per §8):** the other 13 tube shapes, gamepad, start-level selection.
