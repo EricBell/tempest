@@ -37,7 +37,7 @@ const ESHOT_SPEED = 0.011;
 const WEB_COLORS = ['#2f6bff', '#ff3b3b', '#e6e63a', '#3be6e6', '#3bff6b', '#c43bff'];
 const COL = {
   claw: '#ffee33', shot: '#ffffaa', flipper: '#ff3355', tanker: '#c050ff',
-  spiker: '#33ff66', eshot: '#ff77aa', text: '#ffee33', dim: '#8899aa'
+  spiker: '#33ff66', fuseball: '#ffaa22', pulsar: '#ff55ff', eshot: '#ff77aa', text: '#ffee33', dim: '#8899aa'
 };
 
 // ---------------------------------------------------------------- RNG (seedable)
@@ -83,6 +83,9 @@ function wrapLane(shape, l) {
   return shape.closed ? ((l % n) + n) % n : Math.max(0, Math.min(n - 1, l));
 }
 function stepLane(shape, l, dir) { return wrapLane(shape, l + dir); }
+// Lane EDGES (the radial lines) are indexed 0..15; closed shapes wrap, open shapes clamp.
+function wrapEdge(shape, e) { return shape.closed ? ((e % 16) + 16) % 16 : Math.max(0, Math.min(15, e)); }
+function stepEdge(shape, e, dir) { return wrapEdge(shape, e + dir); }
 // direction (+1/-1/0) to travel from lane a to lane b
 function laneDir(shape, a, b) {
   if (a === b) return 0;
@@ -126,6 +129,16 @@ function maxSpikers(L) {
   if (L <= 16) return 3; if (L <= 19) return 0; if (L <= 25) return 2; return 1;
 }
 function minTankers(L) { return (L === 3 || L >= 5) ? 1 : 0; }
+function maxFuseballs(L) {
+  if (L < 11) return 0; if (L <= 16) return 1; if (L <= 21) return 0; if (L <= 25) return 1;
+  if (L === 26) return 0; if (L <= 32) return 1; if (L <= 39) return 4; return 3;
+}
+const PULSAR_MAX_17_32 = [5, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 4, 2];
+function maxPulsars(L) { return L < 17 ? 0 : L <= 32 ? PULSAR_MAX_17_32[L - 17] : 3; }
+function minFuseballs(L) { return maxFuseballs(L) > 0 ? 1 : 0; }
+function minPulsars(L) { return L < 17 ? 0 : L <= 32 ? 3 : 1; }
+function pulsarFlipTicks(L) { return Math.max(18, 40 - Math.floor((L - 17) / 2)); }
+const PULSE_PERIOD = 90, PULSE_ON = 28;      // ticks: a Pulsar electrifies its lane for 28 of every 90
 function minSpikers(L) { return L === 4 ? 1 : L <= 16 && L >= 5 ? 2 : L >= 20 ? 1 : 0; }
 const SPIKE_HT = [0, 0, 0, 0xe0, 0xd8, 0xd4, 0xd0, 0xc8, 0xc0, 0xb8, 0xb0, 0xa8, 0xa0, 0xa0, 0xa0, 0xa8, 0xa0, 0x9c, 0x9a, 0x98];
 function initSpike(L) {
@@ -141,15 +154,27 @@ function flipperSpeed(L) { return Math.min(0.0095, 0.0032 + 0.00016 * L); }
 function spawnInterval(L) { return Math.max(24, 80 - 3 * L); }
 
 function makePlan(L) {
-  const total = waveTotal(L), mt = maxTankers(L), ms = maxSpikers(L);
+  const total = waveTotal(L), mt = maxTankers(L), ms = maxSpikers(L), mf = maxFuseballs(L), mp = maxPulsars(L);
   const plan = [];
+  const tankerKind = () => {              // from L20 some Tankers carry Fuseballs or Pulsars
+    if (L < 20) return 'tanker';
+    const r = rand();
+    if (r < 0.34 && mf > 0) return 'tanker:fuseball';
+    if (r < 0.67 && mp > 0) return 'tanker:pulsar';
+    return 'tanker';
+  };
   for (let i = 0; i < Math.min(minTankers(L), mt); i++) plan.push('tanker');
   for (let i = 0; i < Math.min(minSpikers(L), ms); i++) plan.push('spiker');
-  let tk = plan.filter(t => t === 'tanker').length, sk = plan.length - tk;
+  for (let i = 0; i < Math.min(minFuseballs(L), mf); i++) plan.push('fuseball');
+  for (let i = 0; i < Math.min(minPulsars(L), mp); i++) plan.push('pulsar');
+  const count = pre => plan.filter(t => t.startsWith(pre)).length;
+  let tk = count('tanker'), sk = count('spiker'), fk = count('fuseball'), pk = count('pulsar');
   while (plan.length < total) {
     const r = rand();
-    if (mt > 0 && r < 0.18 && tk < total * 0.3) { plan.push('tanker'); tk++; }
+    if (mt > 0 && r < 0.18 && tk < total * 0.3) { plan.push(tankerKind()); tk++; }
     else if (ms > 0 && r < 0.30 && sk < total * 0.25) { plan.push('spiker'); sk++; }
+    else if (mf > 0 && r < 0.42 && fk < total * 0.2) { plan.push('fuseball'); fk++; }
+    else if (mp > 0 && r < 0.57 && pk < total * 0.25) { plan.push('pulsar'); pk++; }
     else plan.push('flipper');
   }
   for (let i = plan.length - 1; i > 0; i--) { const j = randInt(i + 1); [plan[i], plan[j]] = [plan[j], plan[i]]; }
@@ -177,6 +202,8 @@ const CLAW = [[-0.62, -0.05], [-0.62, 0.55], [-0.34, 0.22], [-0.17, 0.72], [0, 0
 const BOWTIE = [[-1, -0.55], [1, 0.55], [1, -0.55], [-1, 0.55]];
 const DIAMOND = [[0, 1], [1, 0], [0, -1], [-1, 0]];
 const DIAMOND_X = [[-0.5, 0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, -0.5]];
+const ZIGZAG = [[-1, 0], [-0.65, 0.6], [-0.3, -0.6], [0.05, 0.6], [0.4, -0.6], [0.75, 0.6], [1, 0]];
+const FUSE_COLORS = ['#ffaa22', '#33ddff', '#ff44cc', '#aaff44'];
 const SPIRAL = (() => { const p = []; for (let i = 0; i <= 28; i++) { const a = i * 0.55, r = 0.1 + i * 0.032; p.push([Math.cos(a) * r, Math.sin(a) * r]); } return p; })();
 function text(ctx, s, x, y, size, color, align) {
   ctx.font = 'bold ' + size + 'px "Courier New", Courier, monospace';
@@ -346,17 +373,48 @@ class Game {
     if (--this.spawnTimer > 0) return;
     if (this.enemies.length >= 7) { this.spawnTimer = 6; return; }
     const L = this.level;
-    const cap = { flipper: maxFlippers(L), tanker: maxTankers(L), spiker: maxSpikers(L) };
-    const idx = this.plan.findIndex(t => this.aliveOf(t) < cap[t]);
+    const cap = { flipper: maxFlippers(L), tanker: maxTankers(L), spiker: maxSpikers(L),
+                  fuseball: maxFuseballs(L), pulsar: maxPulsars(L) };
+    const idx = this.plan.findIndex(t => this.aliveOf(t.split(':')[0]) < cap[t.split(':')[0]]);
     if (idx < 0) { this.spawnTimer = 10; return; }
-    const type = this.plan.splice(idx, 1)[0];
-    this.enemies.push(this.makeEnemy(type, randInt(this.shape.lanes), 0, true));
+    const [type, payload] = this.plan.splice(idx, 1)[0].split(':');
+    const e = this.makeEnemy(type, randInt(this.shape.lanes), 0, true);
+    if (payload) e.payload = payload;
+    if (type === 'fuseball') e.edge = randInt(16);
+    this.enemies.push(e);
     this.spawnTimer = Math.round(spawnInterval(L) * (0.6 + rand() * 0.8));
   }
   makeEnemy(type, lane, d, unit) {
-    return { type, lane, d, dir: 1, flip: null, unit, flipTimer: 30 + randInt(70) - this.level };
+    return { type, lane, d, dir: 1, flip: null, unit, payload: 'flipper', flipTimer: 30 + randInt(70) - this.level,
+             edge: lane, hop: null, timer: 20 + randInt(30), phase: randInt(PULSE_PERIOD), pulse: false };
   }
-  enemyLane(e) { return e.flip && e.flip.t >= 0.5 ? stepLane(this.shape, e.lane, e.flip.dir) : e.lane; }
+  planKey(e) { return e.type === 'tanker' && e.payload !== 'flipper' ? 'tanker:' + e.payload : e.type; }
+  // lane an enemy occupies for movement purposes (Fuseballs: nearest lane to their edge)
+  enemyLane(e) {
+    if (e.type === 'fuseball') return wrapLane(this.shape, e.edge);
+    return e.flip && e.flip.t >= 0.5 ? stepLane(this.shape, e.lane, e.flip.dir) : e.lane;
+  }
+  // lane in which a player shot can hit this enemy, or -1 if it cannot be shot right now
+  hitLane(e) {
+    if (e.type !== 'fuseball') return this.enemyLane(e);
+    if (!e.hop || e.d >= 0.97 || e.hop.t < 0.2 || e.hop.t > 0.8) return -1;   // only while crossing a lane
+    return wrapLane(this.shape, e.hop.dir > 0 ? e.edge : e.edge - 1);
+  }
+  // lanes a Fuseball threatens when it is at the rim (on an edge: both neighbours; crossing: that lane)
+  fuseLanes(e) {
+    const sh = this.shape;
+    if (e.hop) return [wrapLane(sh, e.hop.dir > 0 ? e.edge : e.edge - 1)];
+    return [e.edge - 1, e.edge].filter(l => sh.closed || (l >= 0 && l < sh.lanes)).map(l => wrapLane(sh, l));
+  }
+  enemyXY(e) {
+    if (e.type === 'fuseball') {
+      const a = edgeXY(this.shape, e.edge, e.d);
+      if (!e.hop) return { x: a[0], y: a[1] };
+      const b = edgeXY(this.shape, stepEdge(this.shape, e.edge, e.hop.dir), e.d), t = e.hop.t;
+      return { x: a[0] + (b[0] - a[0]) * t, y: a[1] + (b[1] - a[1]) * t };
+    }
+    return this.xy(this.enemyLane(e), e.d);
+  }
 
   // ---- enemies
   updateEnemies() {
@@ -365,6 +423,8 @@ class Game {
     for (const e of this.enemies) {
       let keep = true;
       if (e.type === 'flipper') this.updateFlipper(e);
+      else if (e.type === 'fuseball') this.updateFuseball(e);
+      else if (e.type === 'pulsar') this.updatePulsar(e);
       else if (e.type === 'tanker') {
         e.d += flipperSpeed(L) * 0.75;
         if (e.d >= SPLIT_D) { this.splitTanker(e); keep = false; }
@@ -385,7 +445,7 @@ class Game {
     // enemy fire
     if (this.shotHold > 0) this.shotHold--;
     if (this.shotHold === 0 && this.eshots.length < shotMax(L)) {
-      const c = this.enemies.filter(e => !e.flip && e.d > 0.12 && e.d < 0.88);
+      const c = this.enemies.filter(e => !e.flip && e.d > 0.12 && e.d < 0.88 && e.type !== 'fuseball' && e.type !== 'pulsar');
       if (c.length && rand() < 0.04) {
         const e = c[randInt(c.length)];
         this.eshots.push({ lane: e.lane, d: e.d, prev: e.d });
@@ -394,7 +454,10 @@ class Game {
     }
     // contact with the Blaster
     for (const e of this.enemies) {
-      if (e.type === 'flipper' && e.d >= 0.97 && this.enemyLane(e) === this.player.lane) { this.killPlayer(); break; }
+      const P = this.player.lane;
+      if (e.type === 'flipper' && e.d >= 0.97 && this.enemyLane(e) === P) { this.killPlayer(); break; }
+      if (e.type === 'fuseball' && e.d >= 0.95 && this.fuseLanes(e).includes(P)) { this.killPlayer(); break; }
+      if (e.type === 'pulsar' && e.pulse && this.enemyLane(e) === P) { this.killPlayer(); break; }
     }
   }
   updateFlipper(e) {
@@ -415,15 +478,67 @@ class Game {
     if (dir !== 0 && stepLane(sh, e.lane, dir) !== e.lane) e.flip = { dir, t: 0 };
     e.flipTimer = atRim ? Math.max(8, 40 - 2 * L) : Math.max(25, 90 - 3 * L) + randInt(40);
   }
-  splitTanker(t) {
-    const sh = this.shape;
-    const a = stepLane(sh, t.lane, -1), b = stepLane(sh, t.lane, 1);
-    for (const lane of [a, b]) {
-      const f = this.makeEnemy('flipper', lane, Math.min(t.d, 0.95), false);
-      f.flipTimer = 15 + randInt(30);
-      this.enemies.push(f);
+  updateFuseball(e) {
+    const L = this.level, sh = this.shape, spd = flipperSpeed(L) * 0.9;
+    const rushing = !this.plan.length;               // nothing left to spawn: head for the rim
+    if (e.hop) {
+      e.hop.t += 1 / 18;
+      if (e.hop.t >= 1) { e.edge = stepEdge(sh, e.edge, e.hop.dir); e.hop = null; e.timer = 20 + randInt(35); }
     }
-    this.burst(...Object.values(this.xy(t.lane, t.d)), COL.tanker, 8);
+    if (rushing || e.d >= 1) e.dir = 1;
+    e.d += e.dir * spd * (e.hop ? 0.4 : 1);
+    if (e.d >= 1) e.d = 1;
+    if (e.d <= 0) { e.d = 0; e.dir = 1; }
+    if (e.hop || --e.timer > 0) return;
+    if (e.d >= 1) {                                  // on the rim: hunt the Blaster along the edges
+      let dir = laneDir(sh, e.edge, this.player.lane);
+      if (dir === 0) dir = rand() < 0.5 ? 1 : -1;
+      if (stepEdge(sh, e.edge, dir) !== e.edge) e.hop = { dir, t: 0 };
+      e.timer = Math.max(14, 34 - L);
+    } else {                                         // erratic: hop sideways, reverse, or carry on
+      const r = rand();
+      if (r < 0.5) {
+        let dir = rand() < 0.5 ? 1 : -1;
+        if (stepEdge(sh, e.edge, dir) === e.edge) dir = -dir;
+        e.hop = { dir, t: 0 };
+      } else if (r < 0.75) e.dir = -e.dir;
+      else e.dir = 1;
+      e.timer = 20 + randInt(40);
+    }
+  }
+  updatePulsar(e) {
+    const L = this.level, sh = this.shape, spd = flipperSpeed(L) * 0.8;
+    e.pulse = (this.time + e.phase) % PULSE_PERIOD < PULSE_ON;
+    if (e.dir > 0) { e.d = Math.min(0.92, e.d + spd); if (e.d >= 0.92) e.dir = -1; }
+    else { e.d -= spd; if (e.d <= 0.45) e.dir = 1; }
+    if (e.flip) {
+      e.flip.t += 1 / 14;
+      if (e.flip.t >= 1) { e.lane = stepLane(sh, e.lane, e.flip.dir); e.flip = null; }
+      return;
+    }
+    if (--e.flipTimer > 0) return;
+    let dir = rand() < 0.7 ? laneDir(sh, e.lane, this.player.lane) : (rand() < 0.5 ? 1 : -1);
+    if (dir === 0) dir = rand() < 0.5 ? 1 : -1;
+    if (stepLane(sh, e.lane, dir) === e.lane) dir = -dir;
+    if (stepLane(sh, e.lane, dir) !== e.lane) e.flip = { dir, t: 0 };
+    e.flipTimer = pulsarFlipTicks(L) + randInt(20);
+  }
+  splitTanker(t) {
+    const sh = this.shape, pay = t.payload || 'flipper';
+    const d = Math.min(t.d, pay === 'pulsar' ? 0.9 : 0.95);
+    if (pay === 'fuseball') {
+      for (const edge of [t.lane, t.lane + 1]) {
+        const f = this.makeEnemy('fuseball', 0, d, false);
+        f.edge = wrapEdge(sh, edge); this.enemies.push(f);
+      }
+    } else {
+      for (const lane of [stepLane(sh, t.lane, -1), stepLane(sh, t.lane, 1)]) {
+        const f = this.makeEnemy(pay, lane, d, false);
+        f.flipTimer = 15 + randInt(30); this.enemies.push(f);
+      }
+    }
+    const p = this.enemyXY(t);
+    this.burst(p.x, p.y, COL.tanker, 8);
   }
   xy(lane, d) { const f = laneFrame(this.shape, lane, d); return { x: f.x, y: f.y }; }
 
@@ -437,7 +552,7 @@ class Game {
       if (alive) {
         for (let i = 0; i < this.enemies.length; i++) {
           const e = this.enemies[i];
-          if (this.enemyLane(e) !== s.lane) continue;
+          if (this.hitLane(e) !== s.lane) continue;
           const tol = e.type === 'tanker' ? 0.045 : 0.04;
           if (e.d >= s.d - tol && e.d <= s.prev + tol) { this.killEnemy(e, true); alive = false; break; }
         }
@@ -464,9 +579,10 @@ class Game {
   killEnemy(e, byShot) {
     const idx = this.enemies.indexOf(e);
     if (idx >= 0) this.enemies.splice(idx, 1);
-    const pts = { flipper: 150, tanker: 100, spiker: 50 }[e.type] || 0;
+    const pts = e.type === 'fuseball' ? (e.d < 0.34 ? 250 : e.d < 0.67 ? 500 : 750)
+              : { flipper: 150, tanker: 100, spiker: 50, pulsar: 200 }[e.type] || 0;
     this.addScore(pts);
-    const p = this.xy(this.enemyLane(e), e.d);
+    const p = this.enemyXY(e);
     this.burst(p.x, p.y, COL[e.type], 10);
     if (e.type === 'tanker' && byShot) this.splitTanker(e);
   }
@@ -511,7 +627,7 @@ class Game {
     if (this.lives <= 0) { this.state = 'GAMEOVER'; this.stateT = 120; return; }
     if (this.dyingFrom === 'PLAYING') {
       // the wave restarts: surviving wave enemies go back to the queue
-      for (const e of this.enemies) if (e.unit) this.plan.unshift(e.type);
+      for (const e of this.enemies) if (e.unit) this.plan.unshift(this.planKey(e));
       this.enemies = []; this.eshots = []; this.zap = null;
       this.spawnTimer = 90; this.shotHold = 60;
     } else this.clearMin = 150;
@@ -614,29 +730,68 @@ class Game {
     }
     ctx.stroke();
   }
+  flipFrame(e) {
+    const sh = this.shape;
+    let f = laneFrame(sh, e.lane, e.d);
+    if (e.flip) {
+      const f1 = laneFrame(sh, stepLane(sh, e.lane, e.flip.dir), e.d), t = e.flip.t;
+      let dt = Math.atan2(f1.uy, f1.ux) - Math.atan2(f.uy, f.ux);
+      while (dt > Math.PI) dt -= TAU; while (dt < -Math.PI) dt += TAU;
+      const lift = Math.sin(Math.PI * t) * f.w * 0.35;
+      const g = frameRot(f, dt * t + Math.PI * t * e.flip.dir);
+      g.x = f.x + (f1.x - f.x) * t + f.ox * lift;
+      g.y = f.y + (f1.y - f.y) * t + f.oy * lift;
+      f = g;
+    }
+    return f;
+  }
   renderEnemies(ctx) {
     const sh = this.shape;
+    const hash = (a, b) => ((a * 7919 + b * 104729) % 97) / 97;
     for (const e of this.enemies) {
-      let f = laneFrame(sh, e.lane, e.d);
-      if (e.flip) {
-        const f1 = laneFrame(sh, stepLane(sh, e.lane, e.flip.dir), e.d), t = e.flip.t;
-        let dt = Math.atan2(f1.uy, f1.ux) - Math.atan2(f.uy, f.ux);
-        while (dt > Math.PI) dt -= TAU; while (dt < -Math.PI) dt += TAU;
-        const lift = Math.sin(Math.PI * t) * f.w * 0.35;
-        const g = frameRot(f, dt * t + Math.PI * t * e.flip.dir);
-        g.x = f.x + (f1.x - f.x) * t + f.ox * lift;
-        g.y = f.y + (f1.y - f.y) * t + f.oy * lift;
-        f = g;
-      }
+      if (e.type === 'fuseball') { this.renderFuseball(ctx, e, hash); continue; }
+      const f = this.flipFrame(e);
       const sa = Math.min(f.w * 0.42, 60), sb = sa * 0.75;
       if (e.type === 'flipper') { setStroke(ctx, COL.flipper, 2.2, 8); localPath(ctx, BOWTIE, f, sa, sb, true); }
       else if (e.type === 'tanker') {
-        setStroke(ctx, COL.tanker, 2.2, 8); localPath(ctx, DIAMOND, f, sa, sb, true); localPath(ctx, DIAMOND_X, f, sa * 0.8, sb * 0.8, false);
+        setStroke(ctx, COL.tanker, 2.2, 8); localPath(ctx, DIAMOND, f, sa, sb, true);
+        setStroke(ctx, COL[e.payload] || COL.flipper, 2, 6); localPath(ctx, DIAMOND_X, f, sa * 0.8, sb * 0.8, false);
+      } else if (e.type === 'pulsar') {
+        if (e.pulse) {                                  // electrified lane: pulsar down to the rim
+          const lane = this.enemyLane(e);
+          setStroke(ctx, '#ffffff', 2.5, 14);
+          ctx.beginPath();
+          const steps = 16, k = this.time >> 2;
+          for (let i = 0; i <= steps; i++) {
+            const d = e.d + (1 - e.d) * i / steps, lf = laneFrame(sh, lane, d);
+            const off = (i % 2 ? 1 : -1) * lf.w * 0.22 * (0.5 + hash(i, k));
+            const x = lf.x + lf.ux * off, y = lf.y + lf.uy * off;
+            if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+          }
+          ctx.stroke();
+        }
+        setStroke(ctx, e.pulse ? '#ffffff' : COL.pulsar, 2.4, 10); localPath(ctx, ZIGZAG, f, sa, sb, false);
       } else {
         const g = frameRot(f, this.time * 0.25);
         setStroke(ctx, COL.spiker, 2, 8); localPath(ctx, SPIRAL, g, sa * 1.1, sa * 1.1, false);
       }
     }
+  }
+  renderFuseball(ctx, e, hash) {
+    const p = this.enemyXY(e);
+    const lf = laneFrame(this.shape, wrapLane(this.shape, e.edge), e.d);
+    const sz = Math.min(lf.w * 0.32, 34);
+    const col = FUSE_COLORS[Math.floor(this.time / 12) % FUSE_COLORS.length];   // ~5 Hz colour cycle, no hard strobing
+    setStroke(ctx, col, 2, 10);
+    ctx.beginPath();
+    const k = this.time >> 2;
+    for (let i = 0; i < 10; i++) {
+      const a = i / 10 * TAU + this.time * 0.04, r2 = sz * (0.75 + 0.55 * hash(i, k));
+      ctx.moveTo(p.x + Math.cos(a) * sz * 0.3, p.y + Math.sin(a) * sz * 0.3);
+      ctx.lineTo(p.x + Math.cos(a) * r2, p.y + Math.sin(a) * r2);
+    }
+    ctx.stroke();
+    ctx.beginPath(); ctx.arc(p.x, p.y, sz * 0.3, 0, TAU); ctx.stroke();
   }
   renderShots(ctx) {
     setStroke(ctx, COL.shot, 2.5, 8);
@@ -731,7 +886,7 @@ class Game {
 
 // ---------------------------------------------------------------- exports (for headless tests)
 root.TempestCore = { Game, SHAPES, setSeed, laneDir, stepLane, wrapLane, scaleAt, laneFrame, edgeXY,
-  waveTotal, maxFlippers, maxTankers, maxSpikers, initSpike, shotHoldoff, shotMax, makePlan, W, H };
+  waveTotal, maxFlippers, maxTankers, maxSpikers, maxFuseballs, maxPulsars, minPulsars, initSpike, shotHoldoff, shotMax, makePlan, W, H };
 
 // ---------------------------------------------------------------- browser bootstrap
 if (typeof document !== 'undefined') {

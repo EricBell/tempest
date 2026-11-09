@@ -78,7 +78,7 @@ Introduction levels are from the original; v1 may stage them in, but the spec ta
 | Fuseball Tanker / Pulsar Tanker | later levels | Tanker variants | Split into two Fuseballs / Pulsars | 100 |
 
 - Enemies appear one at a time early on; spawn interval shortens and enemy count per wave rises with level.
-- **v1 scope:** Flipper, Tanker, Spiker/spikes, Fuseball, Pulsar are all in the original; **Decided: v1 = Flipper + Tanker + Spiker**, with Fuseball and Pulsar **[later]**.
+- **v1 scope:** Flipper, Tanker, Spiker/spikes, Fuseball, Pulsar are all in the original; **Decided: v1 = Flipper + Tanker + Spiker.** Fuseball and Pulsar (and their Tanker variants) were added afterwards (issue #2); see §11.
 
 ### 5.5 Systems / State Management **[v1]**
 - **Collision detection:** per §5.3. Blaster hit tests: enemy on the rim in the same lane (or overlapping edge for Fuseballs), enemy shot reaching the rim in the Blaster's lane, active Pulsar lane.
@@ -117,7 +117,7 @@ Settled in discussion; these override anything earlier in the document that conf
 
 | Topic | Decision |
 |---|---|
-| v1 enemies | Flipper + Tanker + Spiker (Fuseball, Pulsar later) |
+| Enemies | v1: Flipper + Tanker + Spiker. Added later (issue #2): Fuseball (L11+), Pulsar (L17+), Fuseball/Pulsar Tankers (L20+) |
 | Death | Original behaviour: clear enemies/shots, reset pending timers, restart the wave; no invulnerability |
 | Controls | Keyboard by default; mouse spinner (Pointer Lock) opt-in by clicking the canvas |
 | Sound | Silent in v1; synthesised Web Audio later |
@@ -244,4 +244,8 @@ Where the first build deviates from, or fills in, this spec:
 - **Superzapper:** first use kills enemies one by one over ~19 ticks, second use kills one. Tankers killed by the zapper do not split. Spawning pauses while zapping. Charges show as two cyan rings under the score.
 - **Pause:** `P` toggles; `Esc`, losing Pointer Lock, tab blur and tab hide all pause (never unpause).
 - **Fixed-timestep loop:** 60 Hz, accumulator capped at 250 ms. Seed the RNG with `?seed=123`. `window.TempestCore` and `window.__tempest` expose the logic for testing.
-- **Not built (per §8):** sound, Fuseball, Pulsar, the other 13 tube shapes, gamepad, start-level selection.
+- **Fuseball (issue #2):** sits on a lane *edge* and hops sideways across lanes (18 ticks per hop). It can only be shot **while crossing a lane** (the middle 60% of a hop) and never at the rim, where only the Superzapper kills it. Mid-tube it hops, reverses and climbs erratically; once nothing is left to spawn it rushes to the rim, then hunts the Blaster along the edges. It kills the Blaster when it is at the rim on an edge next to the Blaster's lane or crossing it. Score 250 / 500 / 750 by depth (far / middle / near). Colour cycles at ~5 Hz and the spark jitter at 15 Hz (§10.7).
+- **Pulsar (issue #2):** climbs to 92% depth, retreats to 45%, and repeats. It flips lanes toward the Blaster (70%) or randomly. It pulses for 28 of every 90 ticks; while pulsing the whole lane from the Pulsar down to the rim is electrified and kills the Blaster if it is in that lane. Score 200. Never shoots.
+- **Tanker variants (issue #2):** from L20 some Tankers carry Fuseballs (a pair, on the Tanker's two lane edges) or Pulsars (in the neighbouring lanes). The payload shows as the colour of the inner cross: red = Flippers, orange = Fuseballs, magenta = Pulsars. Payload enemies don't count against the per-type caps. A Tanker killed by the Superzapper does not split.
+- **Caps and minimums:** Fuseball and Pulsar maxima and per-wave minimums follow §9.3. Tanker/Spiker/Fuseball/Pulsar shares of the remaining wave slots are tuned by feel.
+- **Not built (per §8):** sound, the other 13 tube shapes, gamepad, start-level selection.
